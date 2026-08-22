@@ -2,7 +2,10 @@
     "cSpell.words": [
         "blocklisted",
         "chainid",
+        "nodestar",
         "Reentrancy",
+        "Undercollateralized",
+        "Valkema",
         "viem"
     ],
     "solidity.formatter": "forge",

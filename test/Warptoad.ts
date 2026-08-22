@@ -12,18 +12,64 @@ describe("Warptoad", async function () {
 
   let chainLabels: { symbol: string; name: string };
   let warptoad: WarptoadContract;
+  let blocked: ContractReturnType<"MockERC20">;
 
   before(async () => {
     chainLabels = chainName(await publicClient.getChainId());
   });
 
   beforeEach(async () => {
+    // Stands in for a rebasing token: something the deployer knows breaks the 1:1
+    // invariant and blocks deposits on from the start.
+    blocked = await viem.deployContract("MockERC20", ["Rebasing", "REB", 18]);
     warptoad = await viem.deployContract("Warptoad", [
       SYMBOL_PREFIX,
       NAME_PREFIX,
       chainLabels.symbol,
       chainLabels.name,
+      [blocked.address],
     ]);
+  });
+
+  describe("blocklist", () => {
+    it("marks the constructor's tokens closed and leaves everything else open", async () => {
+      const token = await viem.deployContract("MockERC20", ["USD Coin", "USDC", 6]);
+      assert.equal(await warptoad.read.closedPools([blocked.address]), true);
+      assert.equal(await warptoad.read.closedPools([token.address]), false);
+    });
+
+    it("refuses deposits of a blocked token", async () => {
+      await blocked.write.mint([holder.account.address, 1000n]);
+      await blocked.write.approve([warptoad.address, 1000n]);
+
+      await assert.rejects(
+        warptoad.write.wrapERC20([blocked.address, 1000n, holder.account.address]),
+        /PoolIsClosed/,
+      );
+      // No wrapper should have been deployed for it either.
+      assert.equal(
+        await warptoad.read.erc20WrapperOf([blocked.address]),
+        "0x0000000000000000000000000000000000000000",
+      );
+    });
+
+    it("refuses ERC-1155 deposits of a blocked collection", async () => {
+      const collection = await viem.deployContract("MockERC1155", ["Blocked", "BLK", "ipfs://x/"]);
+      const vault = await viem.deployContract("Warptoad", [
+        SYMBOL_PREFIX,
+        NAME_PREFIX,
+        chainLabels.symbol,
+        chainLabels.name,
+        [collection.address],
+      ]);
+      await collection.write.mint([holder.account.address, 1n, 5n]);
+      await collection.write.setApprovalForAll([vault.address, true]);
+
+      await assert.rejects(
+        vault.write.wrapERC1155([collection.address, 1n, 5n, holder.account.address]),
+        /PoolIsClosed/,
+      );
+    });
   });
 
   describe("wrapERC20", () => {

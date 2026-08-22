@@ -11,6 +11,11 @@ import {WarptoadERC20} from "./WarptoadERC20.sol";
 import {WarptoadERC1155} from "./WarptoadERC1155.sol";
 import {TokenMetadata} from "./libraries/TokenMetadata.sol";
 
+/**
+ * @title Warptoad
+ * @author Jim Jim Valkema, nodestarQ
+ * @notice does NOT support rebasing tokens!
+ */
 contract Warptoad is ERC1155Holder, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
@@ -28,6 +33,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
     /// @notice Underlying a wrapper redeems for. Non-zero exactly for tokens this vault deployed.
     mapping(address wrapper => address underlying) public underlyingOf;
 
+    /// @notice underlying tokens where wrapping is blocked (unwrapping is always allowed), only constructor and closeUndercollateralizedPool can add
+    mapping(address underlying => bool closed) public closedPools;
+
     event ERC20WrapperCreated(address indexed underlying, address indexed wrapper);
     event ERC1155WrapperCreated(address indexed underlying, address indexed wrapper);
     event ERC20Wrapped(address indexed underlying, address indexed wrapper, address indexed to, uint256 amount);
@@ -39,21 +47,38 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         address indexed underlying, address indexed wrapper, address indexed to, uint256 id, uint256 amount
     );
 
+    /// @notice A pool stopped accepting deposits. Never emitted for the reverse — closing is one-way.
+    event PoolClosed(address indexed underlying);
+
     /// @dev Thrown when unwrapping a token this vault did not issue, or issued for the other standard.
     error NotAWrapper(address token);
+    /// @dev Thrown when wrapping an underlying whose pool is closed. Unwrapping it still works.
+    error PoolIsClosed(address token);
     error ZeroAmount();
     error ZeroAddress();
 
+    /**
+     * @param _blockedTokens blocks these tokes from every being wrapped. Meant for rebasing tokens
+     * who can break solvency.
+     * @notice don't worry: can only be done at constructor or if a rebase token is detected (with closeUndercollateralizedPool)
+     * and you can always unwrap :D
+     */
     constructor(
         string memory _symbolPreFix,
         string memory _namePreFix,
         string memory _chainSymbol,
-        string memory _chainName
+        string memory _chainName,
+        address[] memory _blockedTokens
     ) {
         symbolPreFix = _symbolPreFix;
         namePreFix = _namePreFix;
         chainSymbol = _chainSymbol;
         chainName = _chainName;
+
+        for (uint256 i = 0; i < _blockedTokens.length; i++) {
+            closedPools[_blockedTokens[i]] = true;
+            emit PoolClosed(_blockedTokens[i]);
+        }
     }
 
     // Takes a symbol like USDC -> wtUSDC@eth for example on L1
@@ -81,6 +106,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         nonReentrant
         returns (address wrapper, uint256 minted)
     {
+        if (closedPools[_token]) revert PoolIsClosed(_token);
+
         wrapper = _getOrCreateERC20Wrapper(_token);
 
         // Check before balance to deal with fee on transfer tokens causing insolvency
@@ -134,6 +161,19 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         emit ERC20WrapperCreated(_token, wrapper);
     }
 
+    // function closeUndercollateralizedPool(address _token) external returns (bool closed) {
+    //     address wrapper = erc20WrapperOf[_token];
+    //     if (wrapper == address(0)) revert NotAWrapper(_token);
+    //
+    //     if (IERC20(_token).balanceOf(address(this)) >= WarptoadERC20(wrapper).totalSupply()) {
+    //         return false;
+    //     }
+    //
+    //     poolIsClosed[_token] = true;
+    //     emit PoolClosed(_token);
+    //     return true;
+    // }
+
     // --- ERC-1155 -------------------------------------------------------------
 
     /**
@@ -147,6 +187,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         nonReentrant
         returns (address wrapper)
     {
+        if (closedPools[_collection]) revert PoolIsClosed(_collection);
+
         wrapper = _getOrCreateERC1155Wrapper(_collection);
 
         IERC1155(_collection).safeTransferFrom(msg.sender, address(this), _id, _amount, "");
