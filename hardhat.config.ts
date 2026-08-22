@@ -5,8 +5,17 @@ export default defineConfig({
   plugins: [hardhatToolboxViemPlugin],
   solidity: {
     profiles: {
+      // Warptoad embeds the creation code of both wrapper tokens, which puts it
+      // over the 24576-byte limit unoptimized. The optimizer is on here too so
+      // dev and test builds deploy the same way a production one does.
       default: {
         version: "0.8.28",
+        settings: {
+          optimizer: {
+            enabled: true,
+            runs: 200,
+          },
+        },
       },
       production: {
         version: "0.8.28",
