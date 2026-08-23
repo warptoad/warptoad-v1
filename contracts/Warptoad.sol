@@ -11,18 +11,34 @@ import {WarptoadERC20} from "./WarptoadERC20.sol";
 import {WarptoadERC1155} from "./WarptoadERC1155.sol";
 import {TokenMetadata} from "./libraries/TokenMetadata.sol";
 
+import {
+    SkinnyIMTPoseidon2WriteStorage,
+    SkinnyIMTDataStorage
+} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteStorage.sol";
+import {SkinnyIMTPoseidon2Read} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2Read.sol";
+import {SkinnyIMTReadableStorage} from "@warptoad/skinny-imt.sol/SkinnyIMTReadableStorage.sol";
+
 /**
  * @title Warptoad
  * @author Jim Jim Valkema, nodestarQ
  * @notice does NOT support rebasing tokens!
  */
-contract Warptoad is ERC1155Holder, ReentrancyGuard {
+contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     using SafeERC20 for IERC20;
+
+    SkinnyIMTDataStorage commitmentTree;
+
+    // let unPadded = [...new TextEncoder().encode("REGULAR_ERC20")].map(b=>b.toString(16));
+    // "0x" + [...new Array(32-unPadded.length).fill("00"), ...unPadded].join("");
+    uint256 REGULAR_ERC20_DOMAIN =      uint256(0x00000000000000000000000000000000000000524547554c41525f4552433230);
+    // toHex("REGULAR_ERC1155", {size:32});
+    uint256 REGULAR_ERC1155_DOMAIN =    uint256(0x0000000000000000000000000000000000524547554c41525f45524331313535);
 
     string symbolPreFix;
     string namePreFix;
-    string chainSymbol;
-    string chainName;
+    string public chainSymbol;
+    string public chainName;
+    uint64 public chainWarpDomain;
 
     /// @notice Wrapper token deployed for an underlying ERC-20, or zero if never wrapped.
     mapping(address underlying => address wrapper) public erc20WrapperOf;
@@ -30,8 +46,14 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
     /// @notice Wrapper collection deployed for an underlying ERC-1155, or zero if never wrapped.
     mapping(address underlying => address wrapper) public erc1155WrapperOf;
 
+    struct Underlying {
+        address token;
+        // not actually chainId, chainId changes when forking, causing user only able to unshield on the chain that did not fork
+        uint64 chainWarpDomain;
+    }
+
     /// @notice Underlying a wrapper redeems for. Non-zero exactly for tokens this vault deployed.
-    mapping(address wrapper => address underlying) public underlyingOf;
+    mapping(address wrapper => Underlying underlying) public underlyingOf;
 
     /// @notice underlying tokens where wrapping is blocked (unwrapping is always allowed), only constructor and closeUndercollateralizedPool can add
     mapping(address underlying => bool closed) public closedPools;
@@ -56,10 +78,16 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
     error PoolIsClosed(address token);
     error ZeroAmount();
     error ZeroAddress();
+    error WrongTreeId();
 
     /**
-     * @param _blockedTokens blocks these tokes from every being wrapped. Meant for rebasing tokens
-     * who can break solvency.
+     *
+     * @param _symbolPreFix: shortened name of the chain this contract is deployed on, used for wrapper symbol
+     * @param _namePreFix: shortened name of the chain this contract is deployed on, used for wrapper symbol
+     * @param _chainSymbol: shortened name of the chain this contract is deployed on, used for wrapper symbol
+     * @param _chainName: shortened name of the chain this contract is deployed on, used for wrapper symbol
+     * @param _chainWarpDomain: shortened name of the chain this contract is deployed on, used for wrapper symbol
+     * @param _blockedTokens blocks these tokes from every being wrapped. Meant for rebasing tokens who can break solvency.
      * @notice don't worry: can only be done at constructor or if a rebase token is detected (with closeUndercollateralizedPool)
      * and you can always unwrap :D
      */
@@ -68,18 +96,51 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         string memory _namePreFix,
         string memory _chainSymbol,
         string memory _chainName,
+        uint64 _chainWarpDomain,
         address[] memory _blockedTokens
     ) {
         symbolPreFix = _symbolPreFix;
         namePreFix = _namePreFix;
         chainSymbol = _chainSymbol;
         chainName = _chainName;
+        chainWarpDomain = _chainWarpDomain;
 
         for (uint256 i = 0; i < _blockedTokens.length; i++) {
             closedPools[_blockedTokens[i]] = true;
             emit PoolClosed(_blockedTokens[i]);
         }
+
+        SkinnyIMTPoseidon2WriteStorage.init(commitmentTree);
     }
+
+    // ------ SkinnyIMT overrides -----------
+    function supportsInterface(bytes4 interfaceId)
+        public
+        view
+        virtual
+        override(SkinnyIMTReadableStorage, ERC1155Holder)
+        returns (bool)
+    {
+        return super.supportsInterface(interfaceId);
+    }
+
+    function _getSkinnyStorageTree(uint256 treeId) internal view override returns (SkinnyIMTDataStorage storage) {
+        if (treeId != commitmentTree.treeData.treeId) {
+            revert WrongTreeId();
+        }
+        return commitmentTree;
+    }
+    //--------------------------------------
+
+    //--------- shielding -----------
+    function shieldErc20(address _wrapper) public {
+        address token = underlyingOf[_wrapper].token;
+        if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
+        // commitment = hash()
+        SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, uint256(123));
+    }
+
+    //----------------------------
 
     // Takes a symbol like USDC -> wtUSDC@eth for example on L1
     function _getTokenSymbol(string memory _baseTokenSymbol) private view returns (string memory) {
@@ -91,14 +152,14 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         return string.concat("Wrapped ", namePreFix, " ", _baseTokenName, " ", chainName);
     }
 
-    // --- ERC-20 ---------------------------------------------------------------
+    // --- ERC-20 wrapping ---------------------------------------------------------------
 
     /**
      * `_amount` is deposited here and `_to` receives wrapped token as claim on this deposit
-     * @notice Creates a new wrapper token contract from a openzeppelin clone factory 
+     * @notice Creates a new wrapper token contract from a openzeppelin clone factory
      * if it does not exist yet
      * @return wrapper The wrapper token minted.
-     * @return minted Amount minted, which can differ from _amount on some tokens 
+     * @return minted Amount minted, which can differ from _amount on some tokens
      * like fee on transfer tokens.
      */
     function wrapERC20(address _token, uint256 _amount, address _to)
@@ -127,9 +188,11 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
     function unwrapERC20(address _wrapper, uint256 _amount, address _to)
         external
         nonReentrant
-        returns (address token)
+        returns (
+            address token // @TODO no definitions in returns. It's a foot gun jimjim fucks up a lott
+        )
     {
-        token = underlyingOf[_wrapper];
+        token = underlyingOf[_wrapper].token;
         if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
 
         WarptoadERC20(_wrapper).burn(msg.sender, _amount);
@@ -157,10 +220,13 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         );
 
         erc20WrapperOf[_token] = wrapper;
-        underlyingOf[wrapper] = _token;
+        underlyingOf[wrapper] = Underlying({token: _token, chainWarpDomain: chainWarpDomain});
         emit ERC20WrapperCreated(_token, wrapper);
     }
 
+    // is cute but wrapper tokens get burned upon shielding and get minted on different chains
+    // so not a valid detection mechanism, but it might be possible if we swap out `WarptoadERC20(wrapper).totalSupply`
+    // for another counter
     // function closeUndercollateralizedPool(address _token) external returns (bool closed) {
     //     address wrapper = erc20WrapperOf[_token];
     //     if (wrapper == address(0)) revert NotAWrapper(_token);
@@ -174,11 +240,11 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
     //     return true;
     // }
 
-    // --- ERC-1155 -------------------------------------------------------------
+    // --- ERC-1155  wrapping -------------------------------------------------------------
 
     /**
      * `_amount` of the `_id` is deposited here and _to receives wrapped token as claim on this deposit
-     * @notice Creates a new wrapper token contract from a openzeppelin clone factory 
+     * @notice Creates a new wrapper token contract from a openzeppelin clone factory
      * if it does not exist yet
      * @return wrapper The wrapper collection minted.
      */
@@ -207,7 +273,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         nonReentrant
         returns (address collection)
     {
-        collection = underlyingOf[_wrapper];
+        collection = underlyingOf[_wrapper].token;
         if (collection == address(0) || erc1155WrapperOf[collection] != _wrapper) revert NotAWrapper(_wrapper);
 
         WarptoadERC1155(_wrapper).burn(msg.sender, _id, _amount);
@@ -233,7 +299,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard {
         );
 
         erc1155WrapperOf[_collection] = wrapper;
-        underlyingOf[wrapper] = _collection;
+        underlyingOf[wrapper] = Underlying({token: _collection, chainWarpDomain: chainWarpDomain});
         emit ERC1155WrapperCreated(_collection, wrapper);
     }
 }
