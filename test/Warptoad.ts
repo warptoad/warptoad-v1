@@ -9,6 +9,17 @@ import { deployCreate2, type Create2Artifact, deployCreate2Factory } from "@warp
 import { type Hex } from "viem";
 import skinnyIMTArtifact from "@warptoad/skinny-fat-imt-js/create2/evm-artifacts/SkinnyIMTPoseidon2WriteStorage" with { type: "json" };
 import IMTSalts from "@warptoad/skinny-fat-imt-js/create2/evm-artifacts/create2-salts.json" with { type: "json" };
+import poseidon2YulArtifact from "poseidon2-evm/out/Poseidon2Yul.sol/Poseidon2Yul_BN254.json" with { type: "json" };
+
+/**
+ * The address `poseidon2-evm`'s `Poseidon2` library hardcodes for its Yul contract.
+ * Same on every chain zemse has deployed it to.
+ */
+const POSEIDON2_YUL = "0xB2542195Ad96AcfBC962C48A97D7640A9F5386D2" as const;
+
+/** poseidon2_bn254(1, 2), the placeholder commitment `shieldErc20` currently inserts. */
+const POSEIDON2_OF_1_AND_2 =
+    0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383n;
 
 describe("Warptoad", async function () {
     const { viem } = await network.create();
@@ -22,14 +33,6 @@ describe("Warptoad", async function () {
     let skinnyIMT: any;
 
     before(async () => {
-        chainLabels = chainName(await publicClient.getChainId());
-        // chainWarpDomain !== chainId, it is a unique identifier for each contract within warptoad.
-        // we use chainId here since it is unique and recognizable, but chainWarpDomain is not just chainId,
-        // it will not change once ethereum or other chains fork
-        // tldr: chainWarpDomain is basically pinned chainId at deployment
-        chainWarpDomain = BigInt(await publicClient.getChainId())
-        // A fresh in-memory node has no deterministic-deployment-proxy, and `deployCreate2`
-        // refuses to run without one.
         await deployCreate2Factory(publicClient, deployer, deployer.account);
         skinnyIMT = await deployCreate2({
             artifact: skinnyIMTArtifact as Create2Artifact,
@@ -37,6 +40,25 @@ describe("Warptoad", async function () {
             walletClient: deployer,
             publicClient: publicClient,
         })
+
+        // `Poseidon2.YUL` is a hardcoded address and poseidon2-evm publishes no CREATE2 salt, so
+        // unlike the IMT library above it cannot be redeployed to that address locally. Etching the
+        // shipped runtime bytecode is the only way to reach it from a fresh node.
+        // @TODO open an issue at github.com/zemse/poseidon2-evm asking for the deployment salt to be
+        // published, so this can become a real deployCreate2 like the IMT library above.
+        const testClient = await viem.getTestClient();
+        await testClient.setCode({
+            address: POSEIDON2_YUL,
+            bytecode: poseidon2YulArtifact.deployedBytecode.object as Hex,
+        });
+
+        chainLabels = chainName(await publicClient.getChainId());
+        // chainWarpDomain !== chainId, it is a unique identifier for each contract within warptoad.
+        // we use chainId here since it is unique and recognizable, but chainWarpDomain is not just chainId,
+        // it will not change once ethereum or other chains fork
+        // tldr: chainWarpDomain is basically pinned chainId at deployment
+        chainWarpDomain = BigInt(await publicClient.getChainId())
+
     });
 
     beforeEach(async () => {
@@ -294,6 +316,42 @@ describe("Warptoad", async function () {
         it("lets only the vault mint or burn the wrapper", async () => {
             await assert.rejects(wrapper.write.mint([deployer.account.address, 1n]), /OnlyWarptoad/);
             await assert.rejects(wrapper.write.burn([deployer.account.address, 1n]), /OnlyWarptoad/);
+        });
+    });
+
+    describe("shieldErc20", () => {
+        let token: ContractReturnType<"MockERC20">;
+        let wrapperAddress: `0x${string}`;
+        let treeId: bigint;
+
+        beforeEach(async () => {
+            token = await viem.deployContract("MockERC20", ["USD Coin", "USDC", 6]);
+            await token.write.mint([deployer.account.address, 1000n]);
+            await token.write.approve([warptoad.address, 1000n]);
+            await warptoad.write.wrapERC20([token.address, 1000n, deployer.account.address]);
+            wrapperAddress = await warptoad.read.erc20WrapperOf([token.address]);
+            // Derived from a storage slot at init, so ask the contract rather than hardcode it.
+            treeId = await warptoad.read.commitmentTreeId();
+        });
+
+        it("burns the wrapper and inserts the commitment as a leaf", async () => {
+            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n]);
+
+            const wrapper = await viem.getContractAt("WarptoadERC20", wrapperAddress);
+            assert.equal(await wrapper.read.balanceOf([deployer.account.address]), 600n);
+
+            // The placeholder commitment: whatever the etched Yul contract at POSEIDON2_YUL
+            // returns for hash_2(1, 2). Asserting the vector rather than trusting the etch means
+            // stale or wrong bytecode in node_modules fails here instead of passing silently.
+            const leaves = await warptoad.read.getSkinnyLeaves([treeId, 0n, 1n]);
+            assert.deepEqual(leaves, [POSEIDON2_OF_1_AND_2]);
+        });
+
+        it("rejects a token this vault did not issue", async () => {
+            await assert.rejects(
+                warptoad.write.shieldErc20([token.address, 1n, 42n]),
+                /NotAWrapper/,
+            );
         });
     });
 

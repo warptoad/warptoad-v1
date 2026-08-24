@@ -15,8 +15,11 @@ import {
     SkinnyIMTPoseidon2WriteStorage,
     SkinnyIMTDataStorage
 } from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteStorage.sol";
+//import {SkinnyIMTDataEvent} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteEvent.sol";
 import {SkinnyIMTPoseidon2Read} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2Read.sol";
 import {SkinnyIMTReadableStorage} from "@warptoad/skinny-imt.sol/SkinnyIMTReadableStorage.sol";
+
+import {Poseidon2} from "poseidon2-evm/src/bn254/Poseidon2.sol";
 
 /**
  * @title Warptoad
@@ -30,9 +33,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
     // let unPadded = [...new TextEncoder().encode("REGULAR_ERC20")].map(b=>b.toString(16));
     // "0x" + [...new Array(32-unPadded.length).fill("00"), ...unPadded].join("");
-    uint256 REGULAR_ERC20_DOMAIN =      uint256(0x00000000000000000000000000000000000000524547554c41525f4552433230);
+    uint256 REGULAR_ERC20_DOMAIN = uint256(0x00000000000000000000000000000000000000524547554c41525f4552433230);
     // toHex("REGULAR_ERC1155", {size:32});
-    uint256 REGULAR_ERC1155_DOMAIN =    uint256(0x0000000000000000000000000000000000524547554c41525f45524331313535);
+    uint256 REGULAR_ERC1155_DOMAIN = uint256(0x0000000000000000000000000000000000524547554c41525f45524331313535);
 
     string symbolPreFix;
     string namePreFix;
@@ -69,7 +72,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         address indexed underlying, address indexed wrapper, address indexed to, uint256 id, uint256 amount
     );
 
-    /// @notice A pool stopped accepting deposits. Never emitted for the reverse — closing is one-way.
+    /// @notice asset is no longer allowed to be wrapped (unwrapping allowed)
     event PoolClosed(address indexed underlying);
 
     /// @dev Thrown when unwrapping a token this vault did not issue, or issued for the other standard.
@@ -124,6 +127,10 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         return super.supportsInterface(interfaceId);
     }
 
+    function commitmentTreeId() public view returns (uint256) {
+        return commitmentTree.treeData.treeId;
+    }
+
     function _getSkinnyStorageTree(uint256 treeId) internal view override returns (SkinnyIMTDataStorage storage) {
         if (treeId != commitmentTree.treeData.treeId) {
             revert WrongTreeId();
@@ -133,11 +140,33 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     //--------------------------------------
 
     //--------- shielding -----------
-    function shieldErc20(address _wrapper) public {
+    /**
+     *                                      commitmentTree
+     *                                       /           \
+     *                               commitmentLeaf      otherLeafs
+     *                              /       |      \
+     *                             /        |       \
+     *                            /         |        \
+     *  _blindedRecipientDataHash   transferHash     REGULAR_ERC20_DOMAIN
+     *          |                           |                       |
+     * Idk yet, bunch of stuff  h(tokenAddress, 0, amount)          just unique number to separate this from a NFT
+     *  like pubKey + nonce                                         or other commitment types like from a protocol contract
+     * (hashed off-chain in secret)                                 DOMAIN = REGULAR | SWAP | PRE_NULLIFIED & ERC20 | ERC1155
+     * @param _wrapper: which wrapped token to shield
+     * @param _amount: how much to shield
+     * @param _blindedRecipientDataHash: who will receive the shielded tokens, as a blinded hash
+     */
+    function shieldErc20(address _wrapper, uint256 _amount, uint256 _blindedRecipientDataHash) public {
         address token = underlyingOf[_wrapper].token;
         if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
-        // commitment = hash()
-        SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, uint256(123));
+        // burn it, it is now shielded and can be unshielded on this or another chain, where a new wrapper token is minted :D
+        WarptoadERC20(_wrapper).burn(msg.sender, _amount);
+
+        // @notice, zemse poseidon implementation can only hand up to 3 inputs, transferDataHash is just to get around that
+        uint256 placeholderId = 0; // this is used by ERC1155 to specify which item of the collection is send,
+        uint256 transferHash = Poseidon2.hash_3(uint256(uint160(_wrapper)), placeholderId, _amount);
+        uint256 commitmentLeaf = Poseidon2.hash_3(_blindedRecipientDataHash, transferHash, REGULAR_ERC20_DOMAIN);
+        SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, commitmentLeaf);
     }
 
     //----------------------------

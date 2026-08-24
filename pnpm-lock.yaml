@@ -20,6 +20,9 @@ importers:
       '@warptoad/skinny-imt.sol':
         specifier: 0.0.11
         version: 0.0.11
+      poseidon2-evm:
+        specifier: ^2.0.0
+        version: 2.0.0
     devDependencies:
       '@nomicfoundation/hardhat-ignition':
         specifier: ^3.1.8
