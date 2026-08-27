@@ -31,11 +31,20 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
     SkinnyIMTDataStorage commitmentTree;
 
-    // let unPadded = [...new TextEncoder().encode("REGULAR_ERC20")].map(b=>b.toString(16));
+    // ------- asset types ------------------------------
+    // let unPadded = [...new TextEncoder().encode("FUNGIBLE")].map(b=>b.toString(16));
     // "0x" + [...new Array(32-unPadded.length).fill("00"), ...unPadded].join("");
-    uint256 REGULAR_ERC20_DOMAIN = uint256(0x00000000000000000000000000000000000000524547554c41525f4552433230);
-    // toHex("REGULAR_ERC1155", {size:32});
-    uint256 REGULAR_ERC1155_DOMAIN = uint256(0x0000000000000000000000000000000000524547554c41525f45524331313535);
+    uint256 FUNGIBLE_DOMAIN = uint256(0x00000000000000000000000000000000000000000000000046554e4749424c45);
+    // toHex("NON_FUNGIBLE", {size:32});
+    uint256 NON_FUNGIBLE_DOMAIN = uint256(0x00000000000000000000000000000000000000004e4f4e5f46554e4749424c45);
+
+    // ------------ protocol circuits ----------------
+    // toHex("TOAD_SWAP_LOCK", {size:32});
+    uint256 TOAD_SWAP_LOCK_DOMAIN = uint256(0x000000000000000000000000000000000000544f41445f535741505f4c4f434b);
+    // toHex("TOAD_SWAP", {size:32});
+    uint256 PRE_NULLIFIED_DOMAIN = uint256(0x000000000000000000000000000000000000005052455f4e554c4c4946494544);
+    // toHex("REGULAR_SHIELDED", {size:32});
+    uint256 REGULAR_SHIELDED_DOMAIN = uint256(0x00000000000000000000000000000000524547554c41525f534849454c444544);
 
     string symbolPreFix;
     string namePreFix;
@@ -141,17 +150,25 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
     //--------- shielding -----------
     /**
-     *                                      commitmentTree
-     *                                       /           \
-     *                               commitmentLeaf      otherLeafs
-     *                              /       |      \
-     *                             /        |       \
-     *                            /         |        \
-     *  _blindedRecipientDataHash   transferHash     REGULAR_ERC20_DOMAIN
-     *          |                           |                       |
-     * Idk yet, bunch of stuff  h(tokenAddress, 0, amount)          just unique number to separate this from a NFT
-     *  like pubKey + nonce                                         or other commitment types like from a protocol contract
-     * (hashed off-chain in secret)                                 DOMAIN = REGULAR | SWAP | PRE_NULLIFIED & ERC20 | ERC1155
+     *                                                       GigaRoot
+     *                                                         /
+     *                                                 commitmentTreeRoot
+     *                                                  /           \
+     *                                          commitmentLeaf      otherLeafs
+     *                                         /       |
+     *                                        /        |
+     *                                       /         |
+     *                             commitment     ASSET_TYPE
+     *                            /     |    \              \
+     *                           /      |     \              \
+     *  _blindedRecipientDataHash   tokenAddr  amount         \
+     *          |               \                              \
+     * Idk yet, bunch of stuff   PROTOCOL_CIRCUIT             just unique numbers to separate this from a NFT
+     *  like pubKey + nonce                   \
+     * (hashed off-chain in secret)            what logic to use to spend this commitment
+     *                                         User might choose to instantly deposit to make a toadswap,
+     *                                          or just regular shielded tx, we wont know!
+     *
      * @param _wrapper: which wrapped token to shield
      * @param _amount: how much to shield
      * @param _blindedRecipientDataHash: who will receive the shielded tokens, as a blinded hash
@@ -162,16 +179,26 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         // burn it, it is now shielded and can be unshielded on this or another chain, where a new wrapper token is minted :D
         WarptoadERC20(_wrapper).burn(msg.sender, _amount);
 
-        // @notice, zemse poseidon implementation can only hand up to 3 inputs, transferDataHash is just to get around that
-        uint256 placeholderId = 0; // this is used by ERC1155 to specify which item of the collection is send,
-        uint256 transferHash = Poseidon2.hash_3(uint256(uint160(_wrapper)), placeholderId, _amount);
-        uint256 commitmentLeaf = Poseidon2.hash_3(_blindedRecipientDataHash, transferHash, REGULAR_ERC20_DOMAIN);
+        // @notice, zemse poseidon implementation can only handle up to 3 inputs, transferDataHash is just to get around that
+        uint256 commitment = Poseidon2.hash_3(_blindedRecipientDataHash, uint256(uint160(_wrapper)), _amount);
+        // TODO maybe picking which
+        uint256 commitmentLeaf = Poseidon2.hash_2(commitment, FUNGIBLE_DOMAIN);
         SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, commitmentLeaf);
+    }
+
+    function unshieldErc20(address _wrapper, uint256 _amount, address _recipient) public {
+        address token = underlyingOf[_wrapper].token;
+        if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
+        // verify proof
+        // public inputs like amount, wrapper address, recipient, 
+
+        WarptoadERC20(_wrapper).mint(_recipient, _amount);
     }
 
     //----------------------------
 
     // Takes a symbol like USDC -> wtUSDC@eth for example on L1
+    // Maybe wt:USDC@eth, wt:USDC:eth
     function _getTokenSymbol(string memory _baseTokenSymbol) private view returns (string memory) {
         return string.concat(symbolPreFix, _baseTokenSymbol, "@", chainSymbol);
     }
@@ -272,6 +299,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     // --- ERC-1155  wrapping -------------------------------------------------------------
 
     /**
+     * TODO 721 just support wrapping by default.
      * `_amount` of the `_id` is deposited here and _to receives wrapped token as claim on this deposit
      * @notice Creates a new wrapper token contract from a openzeppelin clone factory
      * if it does not exist yet
@@ -291,6 +319,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
         emit ERC1155Wrapped(_collection, wrapper, _to, _id, _amount);
     }
+
+    //wrapERC721
 
     /**
      * @notice Burns `_amount` of `_wrapper`'s token `_id` from the caller and
