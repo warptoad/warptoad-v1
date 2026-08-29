@@ -1,11 +1,41 @@
 mod merkle;
 
-use crate::merkle::{leaf_to_root, LeafInclusionProof};
+use crate::merkle::{
+    leaf_and_index_to_root, leaf_to_root, LeafAndIndexInclusionProof, LeafInclusionProof,
+};
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::Poseidon2, poseidon::PoseidonHasher};
 
 global CIRCUIT_SIZE: u32 = 4;
 global MAX_TREE_DEPTH: u32 = 32;
+//   let unPadded = [...new TextEncoder().encode("JOIN_SPLIT")].map(b=>b.toString(16));
+//     "0x" + [...new Array(32-unPadded.length).fill("00"), ...unPadded].join("");
+global JOIN_SPLIT_SELECTOR: Field =
+    0x000000000000000000000000000000000000000000004a4f494e5f53504c4954;
+
+global JOIN_SPLIT_NULLIFIER_SLOT: Field = 0x00;
+global SWAP_NULLIFIER_SLOT: Field = 0x00;
+global SWAP_TIMER_NULLIFIER_SLOT: Field = 0x01;
+
+// no branded types so we do the .inner convention
+// aztec does it like that as well
+pub struct OwnerHash {
+    inner: Field,
+}
+
+// h(BlindedRecipientHash, circuit_contract_DOMAIN)
+// who owns this and inside what circuit_contract
+pub struct PreCommitmentHash {
+    inner: Field,
+}
+
+pub struct CommitmentHash {
+    inner: Field,
+}
+
+pub struct CommitmentLeafHash {
+    inner: Field,
+}
 
 pub struct PubKey {
     x: Field,
@@ -18,42 +48,25 @@ pub struct Signature {
     scalar: Field,
 }
 
-pub struct BlindedRecipient {
+pub struct OwnerData {
     spending_key: PubKey,
-    destination_warp_domain: Field,
-    // derived from viewing key
-    nonce: Field,
-}
-
-// no branded types so we do the .inner convention
-// aztec does it like that as well
-pub struct BlindedRecipientHash {
-    inner: Field,
-}
-
-// h(BlindedRecipientHash, PROTOCOL_CONTRACT_DOMAIN)
-// who owns this and inside what PROTOCOL_CONTRACT
-pub struct OwnerHash {
-    inner: Field,
-}
-
-pub struct CommitmentHash {
-    inner: Field,
-}
-
-pub struct CommitmentLeafHash {
-    inner: Field,
+    dest_giga_index: Field,
+    // derived from owner private viewing key, only owner needs to know this nonce
+    nullifier_secret: Field,
 }
 
 pub struct PrivateSignedData {
+    circuit_contract_selector: Field,
     // contract address in erc20, keccak(contractAddress, id)[0:31] in erc1155 and erc721
     contract_address: Field,
     // amount in erc20 and erc1155. (always 1 in erc721)
     amount: Field,
-    // which spending pubKey + warp_domain can spend the funds
-    owner_hash: BlindedRecipientHash,
+    // which spending pubKey + circuit_contract_storage_hash can spend the funds
+    recipient_owner_hash: OwnerHash,
     // no one needs to see this
-    sig: Signature,
+    signature: Signature,
+    // made by sender and shared with recipient for the tx that this circuit proofs
+    new_shared_nonce: Field,
 }
 
 pub struct SignedData {
@@ -84,45 +97,50 @@ fn hash_signature_inputs(data: SignedData) -> Field {
         [
             data.private.contract_address,
             data.private.amount,
-            data.private.owner_hash.inner,
+            data.private.recipient_owner_hash.inner,
             data.public_hash,
         ],
         4,
     )
 }
 
-fn hash_blinded_recipient(owner_data: BlindedRecipient) -> BlindedRecipientHash {
+fn hash_owner_data(owner_data: OwnerData) -> OwnerHash {
     // TODO we could only do .x? At-least on grumpkin (short Weierstrass ) thats okay
     // but we got jubjub (twisted edwards)
-    BlindedRecipientHash {
+    OwnerHash {
         inner: Poseidon2::hash(
             [
                 owner_data.spending_key.x,
                 owner_data.spending_key.y,
-                owner_data.destination_warp_domain,
-                owner_data.nonce,
+                owner_data.dest_giga_index,
+                owner_data.nullifier_secret,
             ],
             4,
         ),
     }
 }
 
-fn hash_owner(recipient_hash: BlindedRecipientHash, protocol_contract: Field) -> OwnerHash {
-    OwnerHash { inner: Poseidon2::hash([recipient_hash.inner, protocol_contract], 2) }
-}
-
-fn verify(pub_key: PubKey, sig: Signature, message: Field) -> bool {
-    // eddsa_verify (aka baby jub jub) signing + poseidon already exists in circom
-    // so we do that instead of poseidon2 to make switching easier.
-    eddsa_verify::<PoseidonHasher>(pub_key.x, pub_key.y, sig.scalar, sig.x, sig.y, message)
-}
-
-fn hash_commitment(
+fn hash_pre_commitment(
     owner_hash: OwnerHash,
+    shared_nonce: Field,
+    circuit_contract: Field,
+    circuit_contract_storage_hash: Field,
+) -> PreCommitmentHash {
+    PreCommitmentHash {
+        inner: Poseidon2::hash(
+            [owner_hash.inner, shared_nonce, circuit_contract, circuit_contract_storage_hash],
+            4,
+        ),
+    }
+}
+fn hash_commitment(
+    pre_commitment_hash: PreCommitmentHash,
     contract_address: Field,
     amount: Field,
 ) -> CommitmentHash {
-    CommitmentHash { inner: Poseidon2::hash([owner_hash.inner, contract_address, amount], 3) }
+    CommitmentHash {
+        inner: Poseidon2::hash([pre_commitment_hash.inner, contract_address, amount], 3),
+    }
 }
 
 fn hash_commitment_leaf(commitment: CommitmentHash, asset_type: Field) -> CommitmentLeafHash {
@@ -130,89 +148,207 @@ fn hash_commitment_leaf(commitment: CommitmentHash, asset_type: Field) -> Commit
 }
 
 struct CommitmentData {
-    blinded_recipient: BlindedRecipient,
-    protocol_contract: Field,
+    owner_data: OwnerData,
+    // generated by sender, shared to recipient, not seen by public
+    shared_nonce: Field,
+    circuit_contract: Field,
+    circuit_contract_storage_hash: Field,
     contract_address: Field,
     amount: Field,
     asset_type: Field,
 }
 
-/**              zemse's Poseidon2 in solidity only supports 
- *               3 inputs so we cram in ASSET_TYPE like this 😭              GigaRoot
- *                                                         |                   /
- *          everything else + which asset and how much     |   commitmentTreeRoot
- *    note: contractAddr, amount are values in public,     |       /           \
- * during shield/unshield. But not during shielded tx      commitmentLeaf      otherLeafs
- *                                               |          /       |
- *                                               |         /        |
- *              Who owns it + what controls it   |        /         |
- *                                  |           commitment        ASSET_TYPE
- *      to refer to recipient       |          /      |    \             \
- *      without knowing             |         /       |     \            FUNGIBLE or NON_FUNGIBLE 
- *      their chain or pubKey       OwnerHash  contractAddr  amount       
- *              \                  /        \               
- *              BlindedRecipientHash  PROTOCOL_CONTRACT 
- *             / |       |          \
- *        spending  destination    nonce
- *        PubKey     warp         
- *        X and Y    domain                                      
- *                                           
+struct CommitmentDataInclusion<let MAX_DEPTH: u32> {
+    commitmentData: CommitmentData,
+    local_proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
+    giga_proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
+}
+
+fn hash_circuit_contract_storage(slots: [Field; 2]) -> Field {
+    Poseidon2::hash(slots, slots.len())
+}
+
+/**                                       
+ *              everything else + which asset and how much  
+ *        note: contractAddr, amount are values in public,  
+ *     during shield/unshield. But not during shielded tx           gigaRoot
+ *                                                 |                  |      
+ *                                                 |         commitmentTreeRoot
+ *            Who owns it + what controls it       |        /               \                
+ *                                |               commitment               otherLeafs..
+ * to refer to recipient          |              /     |    \  
+ * without knowing                |             /      |     \           
+ * their chain or pubKey       preCommitmentHash    asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
+ *         \                  /   |      \       \        \       
+ *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(contractAddr,0,originGigaIndex,"ERC20"),erc721=keccak(contractAddr,nftId,originGigaIndex,"ERC721"),erc1155=keccak(contractAddr,nftId,"ERC1155")
+ *        / |       |        \   nonce   CONTRACT  \
+ *       / /        |         \                     circuit_contract_storage_hash
+ *  spending  dest_giga_index  nullifier_secret                           /  
+ *   PubKey                             |                                / 
+ *   X and Y             derived from viewingKey              ex in join_split: preNullifier,                            
+ *                       re-used! nullifier(nullifier_secret, leaf_index)    
 */
 fn hash_commitment_data(data: CommitmentData) -> CommitmentLeafHash {
-    let recipient_hash = hash_blinded_recipient(data.blinded_recipient);
-    let owner_hash = hash_owner(recipient_hash, data.protocol_contract);
-    let commitment = hash_commitment(owner_hash, data.contract_address, data.amount);
+    let owner_hash: OwnerHash = hash_owner_data(data.owner_data);
+    //let circuit_contract_storage_hash = hash_circuit_contract_storage();
+    let pre_commitment_hash: PreCommitmentHash =
+        hash_pre_commitment(owner_hash, data.shared_nonce, data.circuit_contract, 0);
+    let commitment: CommitmentHash =
+        hash_commitment(pre_commitment_hash, data.contract_address, data.amount);
     hash_commitment_leaf(commitment, data.asset_type)
 }
 
-struct CommitmentDataInclusion<let MAX_DEPTH: u32> {
-    commitmentData: CommitmentData,
-    proof: LeafInclusionProof<MAX_DEPTH>,
-}
-
-fn proof_commitment_to_root<let MAX_DEPTH: u32>(data: CommitmentDataInclusion<MAX_DEPTH>) -> Field {
-    let commitment_leaf: CommitmentLeafHash = hash_commitment_data(data.commitmentData);
-    leaf_to_root(data.proof, commitment_leaf.inner)
-}
-
-fn verify_commitments(
-    commitment_proofs: [CommitmentDataInclusion<MAX_TREE_DEPTH>; CIRCUIT_SIZE],
+fn proof_commitment_to_local_root<let MAX_DEPTH: u32>(
+    data: CommitmentDataInclusion<MAX_DEPTH>,
 ) -> Field {
-    let root = proof_commitment_to_root(commitment_proofs[0]);
-    for index in 1..CIRCUIT_SIZE {
-        assert(
-            root == proof_commitment_to_root(commitment_proofs[index]),
-            "commitment_proofs are not on the same root: A commitment_proof does not match the root of the first commitment_proof",
-        )
-    }
-    root
+    let commitment_leaf: CommitmentLeafHash = hash_commitment_data(data.commitmentData);
+    leaf_and_index_to_root(data.local_proof, commitment_leaf.inner)
 }
 
+fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
+    proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
+    local_root: Field,
+    valid_giga_index_range: GigaIndexRange,
+) -> Field {
+    assert(
+        lower_or_equal(proof.index, valid_giga_index_range.start),
+        "gigaProof index below valid_giga_index_range",
+    );
+    assert(
+        greater_or_equal(proof.index, valid_giga_index_range.end),
+        "gigaProof index above valid_giga_index_range",
+    );
+    leaf_and_index_to_root(proof, local_root)
+}
+
+struct VerifiedCommitmentData {
+    commitment: CommitmentData,
+    local_root: Field,
+    local_index: Field,
+    giga_root: Field,
+    giga_index: Field
+}
+
+fn proof_root_of_commitments<let SIZE: u32>(
+    commitment_proofs: [CommitmentDataInclusion<MAX_TREE_DEPTH>; SIZE],
+    local_root: Field,
+    valid_giga_index_range: GigaIndexRange,
+    dest_giga_index: Field
+) -> [VerifiedCommitmentData; SIZE] {
+    let mut verified: [VerifiedCommitmentData; SIZE] = std::mem::zeroed();
+    for index in 0..SIZE {
+        // local
+        verified[index].local_root = proof_commitment_to_local_root(commitment_proofs[index]);
+        verified[index].local_index = commitment_proofs[index].local_proof.index;
+        verified[index].commitment = commitment_proofs[index].commitmentData;
+        
+        // giga
+        // contract handed us `local_root` and if that matches our reproduced commit_local_root, we don't need to check the giga_root proof
+        // this so the caller can just put all zeros in the giga_root proof
+        if (verified[index].local_root  != local_root) {
+            verified[index].giga_root = proof_local_root_to_giga_root(
+                commitment_proofs[index].giga_proof,
+                verified[index].local_root,
+                valid_giga_index_range
+            );
+            verified[index].giga_index = commitment_proofs[index].giga_proof.index;
+        } else {
+            // no verifying the gigaProof, hand me zeros if you want.
+            // but no lying about your gigaIndex! we use that for nullifiers to protect against faeries with fake gold!!
+            verified[index].giga_root = 0x00;
+            verified[index].giga_index = dest_giga_index;
+        };
+    }
+    verified
+}
+fn verify_signature(owner_secrets: OwnerData, signature: Signature, sig_hash: Field) -> bool {
+    eddsa_verify::<PoseidonHasher>(
+        owner_secrets.spending_key.x,
+        owner_secrets.spending_key.y,
+        signature.scalar,
+        signature.x,
+        signature.y,
+        sig_hash,
+    )
+}
+
+fn lower_or_equal(a: Field, b: Field) -> bool {
+    !b.lt(a)
+}
+
+fn greater_or_equal(a: Field, b: Field) -> bool {
+    !a.lt(b)
+}
+
+struct GigaIndexRange {
+    // inclusive
+    start: Field,
+    // inclusive
+    end: Field,
+    //the check is: i >= start && i < end
+}
+
+// TODO remember to pad timestamps a bit, by just waiting a extra random amount of time. So not to finger print txs proof time
+// TODO remember to domain separate fake nullifiers and commitments,
 fn main(
+    // TODO we pivot from warp_domain to giga_index, easier and allows us to build nullifiers with h(nullifier_secret, )
+    dest_giga_index: pub Field,
     local_root: pub Field,
     giga_root: pub Field,
     public_hash: pub Field,
     nullifiers: pub [Field; CIRCUIT_SIZE],
-    commitment_proofs: [CommitmentDataInclusion<MAX_TREE_DEPTH>; CIRCUIT_SIZE],
-    private_sign_data: PrivateSignedData,
-    address_secrets: BlindedRecipient,
+    new_commitments: pub [Field; CIRCUIT_SIZE],
+    valid_giga_index_range: pub GigaIndexRange,
+    spend_commitments: [CommitmentDataInclusion<MAX_TREE_DEPTH>; CIRCUIT_SIZE],
+    spending_key: PubKey,
+    signed_data: PrivateSignedData,
+    nullifier_secret: Field,
 ) {
+    let owner_data: OwnerData = OwnerData {
+        spending_key: spending_key,
+        dest_giga_index: dest_giga_index,
+        nullifier_secret: nullifier_secret,
+    };
     let sig_hash: Field = hash_signature_inputs(
-        SignedData { private: private_sign_data, public_hash: public_hash },
+        SignedData { private: signed_data, public_hash: public_hash },
     );
-    // TODO
-    let commitment_root: Field = verify_commitments(commitment_proofs);
-    if(commitment_root == local_root) {
-        // nice we good, no need to check gigaRoot, it was a local transfer!
-    } else {
-        // check gigaRoot pls!!!
-        assert(false, "TODO implementation, inclusion of commitment_root inside the gigaRoot!")
-    }
     assert(
-        verify(
-            address_secrets.spending_key,
-            private_sign_data.sig,
-            sig_hash,
-        ),
+        verify_signature(owner_data, signed_data.signature, sig_hash),
+        "invalid signature",
     );
+    // @warning: THESE COMMITMENTS ARE NOT VERIFIED, only that commitment+proof = root, but THAT ROOT CAN BE INVALID
+    // the `circuit_contract` functions below should check if those roots are valid!
+    let spend_commitments_and_roots: [VerifiedCommitmentData; CIRCUIT_SIZE] =
+        // local_root is passed here, ONLY TO SKIP giga_root proof checks. IT IS NOT VERIFIED
+        proof_root_of_commitments(spend_commitments, local_root, valid_giga_index_range, dest_giga_index);
+
+    //
+    //  @WARNING: the contract_circuits below need to at least verify 3 things:
+    //      -every root in `spend_commitments_and_roots`, all contain valid roots
+    //      -signer, in `signer_owner_secrets` is allowed to nullify and spend these commitment
+    //          ex in join_split, because they are in that commitments
+    //          or in closing a swap, it is proven that counter party has access to the other locked funds
+    //      -commitment being spend contains the expected: `circuit_contract` domain separator
+    //
+    // Fuck any of that up and you quickly have INFINITE MINT BUGS or stolen funds
+    //
+    if (signed_data.circuit_contract_selector == JOIN_SPLIT_SELECTOR) {
+        // TODO nullifier = h(nullifier, giga_index, local_index)
+        // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
+        // just add a nullifier slot number
+        //join_split(nullifiers, new_commitments, spend_commitments);
+    } else {
+        assert(false, "unknown signed_data.circuit_contract_selector");
+    }
 }
+
+fn join_split(
+    local_root: Field,
+    giga_root: Field,
+    public_hash: Field,
+    nullifiers: [Field; CIRCUIT_SIZE],
+    new_commitments: [Field; CIRCUIT_SIZE],
+    spend_commitments: [VerifiedCommitmentData; CIRCUIT_SIZE],
+    address_secrets: OwnerData,
+    signed_data: PrivateSignedData,
+) {}

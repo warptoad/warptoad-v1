@@ -29,7 +29,7 @@ describe("Warptoad", async function () {
     let chainLabels: { symbol: string; name: string };
     let warptoad: WarptoadContract;
     let blocked: ContractReturnType<"MockERC20">;
-    let chainWarpDomain: bigint;
+    let gigaIndex: bigint;
     let skinnyIMT: any;
 
     before(async () => {
@@ -53,11 +53,11 @@ describe("Warptoad", async function () {
         });
 
         chainLabels = chainName(await publicClient.getChainId());
-        // chainWarpDomain !== chainId, it is a unique identifier for each contract within warptoad.
-        // we use chainId here since it is unique and recognizable, but chainWarpDomain is not just chainId,
-        // it will not change once ethereum or other chains fork
-        // tldr: chainWarpDomain is basically pinned chainId at deployment
-        chainWarpDomain = BigInt(await publicClient.getChainId())
+        // we used to use chainIds to define what chain a commitment can be spend on
+        // but that has issues when a rollup or L1 forks since then everyone has assets on both forks
+        // but not for warptoad users
+        // also contract needs to know it's index anyway!
+        gigaIndex = BigInt(0n)
 
     });
 
@@ -72,7 +72,7 @@ describe("Warptoad", async function () {
                 NAME_PREFIX,
                 chainLabels.symbol,
                 chainLabels.name,
-                chainWarpDomain,
+                gigaIndex,
                 [blocked.address],
             ],
             {
@@ -114,7 +114,7 @@ describe("Warptoad", async function () {
                     NAME_PREFIX,
                     chainLabels.symbol,
                     chainLabels.name,
-                    chainWarpDomain,
+                    gigaIndex,
                     [collection.address],
                 ],
                 {

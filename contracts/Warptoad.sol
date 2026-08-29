@@ -21,6 +21,12 @@ import {SkinnyIMTReadableStorage} from "@warptoad/skinny-imt.sol/SkinnyIMTReadab
 
 import {Poseidon2} from "poseidon2-evm/src/bn254/Poseidon2.sol";
 
+enum AssetType {
+    ERC20,
+    ERC721,
+    ERC1155
+}
+
 /**
  * @title Warptoad
  * @author Jim Jim Valkema, nodestarQ
@@ -28,29 +34,14 @@ import {Poseidon2} from "poseidon2-evm/src/bn254/Poseidon2.sol";
  */
 contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     using SafeERC20 for IERC20;
-
+    
     SkinnyIMTDataStorage commitmentTree;
-
-    // ------- asset types ------------------------------
-    // let unPadded = [...new TextEncoder().encode("FUNGIBLE")].map(b=>b.toString(16));
-    // "0x" + [...new Array(32-unPadded.length).fill("00"), ...unPadded].join("");
-    uint256 FUNGIBLE_DOMAIN = uint256(0x00000000000000000000000000000000000000000000000046554e4749424c45);
-    // toHex("NON_FUNGIBLE", {size:32});
-    uint256 NON_FUNGIBLE_DOMAIN = uint256(0x00000000000000000000000000000000000000004e4f4e5f46554e4749424c45);
-
-    // ------------ protocol circuits ----------------
-    // toHex("TOAD_SWAP_LOCK", {size:32});
-    uint256 TOAD_SWAP_LOCK_DOMAIN = uint256(0x000000000000000000000000000000000000544f41445f535741505f4c4f434b);
-    // toHex("TOAD_SWAP", {size:32});
-    uint256 PRE_NULLIFIED_DOMAIN = uint256(0x000000000000000000000000000000000000005052455f4e554c4c4946494544);
-    // toHex("REGULAR_SHIELDED", {size:32});
-    uint256 REGULAR_SHIELDED_DOMAIN = uint256(0x00000000000000000000000000000000524547554c41525f534849454c444544);
 
     string symbolPreFix;
     string namePreFix;
     string public chainSymbol;
     string public chainName;
-    uint64 public chainWarpDomain;
+    uint64 public immutable gigaIndex;
 
     /// @notice Wrapper token deployed for an underlying ERC-20, or zero if never wrapped.
     mapping(address underlying => address wrapper) public erc20WrapperOf;
@@ -98,7 +89,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * @param _namePreFix: shortened name of the chain this contract is deployed on, used for wrapper symbol
      * @param _chainSymbol: shortened name of the chain this contract is deployed on, used for wrapper symbol
      * @param _chainName: shortened name of the chain this contract is deployed on, used for wrapper symbol
-     * @param _chainWarpDomain: shortened name of the chain this contract is deployed on, used for wrapper symbol
+     * @param _gigaIndex:
      * @param _blockedTokens blocks these tokes from every being wrapped. Meant for rebasing tokens who can break solvency.
      * @notice don't worry: can only be done at constructor or if a rebase token is detected (with closeUndercollateralizedPool)
      * and you can always unwrap :D
@@ -108,14 +99,14 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         string memory _namePreFix,
         string memory _chainSymbol,
         string memory _chainName,
-        uint64 _chainWarpDomain,
+        uint64 _gigaIndex,
         address[] memory _blockedTokens
     ) {
         symbolPreFix = _symbolPreFix;
         namePreFix = _namePreFix;
         chainSymbol = _chainSymbol;
         chainName = _chainName;
-        chainWarpDomain = _chainWarpDomain;
+        gigaIndex = _gigaIndex;
 
         for (uint256 i = 0; i < _blockedTokens.length; i++) {
             closedPools[_blockedTokens[i]] = true;
@@ -148,51 +139,47 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     }
     //--------------------------------------
 
+    /**
+     * @notice public to save debugging headaches for sdk
+     * @param contractAddr:
+     * @param id:
+     * @param originGigaIndex:
+     * @param assetType:
+     */
+    function assetId(
+        address contractAddr,
+        uint256 id, // 0 for ERC20
+        uint256 originGigaIndex,
+        AssetType assetType
+    ) public pure returns (uint256) {
+        // >> 8 drops last byte so we fit in a 254 field!
+        return uint256(keccak256(abi.encode(contractAddr, id, originGigaIndex, assetType))) >> 8;
+    }
+
     //--------- shielding -----------
     /**
-     *                                                       GigaRoot
-     *                                                         /
-     *                                                 commitmentTreeRoot
-     *                                                  /           \
-     *                                          commitmentLeaf      otherLeafs
-     *                                         /       |
-     *                                        /        |
-     *                                       /         |
-     *                             commitment     ASSET_TYPE
-     *                            /     |    \              \
-     *                           /      |     \              \
-     *  _blindedRecipientDataHash   tokenAddr  amount         \
-     *          |               \                              \
-     * Idk yet, bunch of stuff   PROTOCOL_CIRCUIT             just unique numbers to separate this from a NFT
-     *  like pubKey + nonce                   \
-     * (hashed off-chain in secret)            what logic to use to spend this commitment
-     *                                         User might choose to instantly deposit to make a toadswap,
-     *                                          or just regular shielded tx, we wont know!
-     *
      * @param _wrapper: which wrapped token to shield
      * @param _amount: how much to shield
-     * @param _blindedRecipientDataHash: who will receive the shielded tokens, as a blinded hash
+     * @param _preCommitmentHash: who will receive the shielded tokens, as a blinded hash
      */
-    function shieldErc20(address _wrapper, uint256 _amount, uint256 _blindedRecipientDataHash) public {
+    function shieldErc20(address _wrapper, uint256 _amount, uint256 _preCommitmentHash) public {
         address token = underlyingOf[_wrapper].token;
         if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
         // burn it, it is now shielded and can be unshielded on this or another chain, where a new wrapper token is minted :D
         WarptoadERC20(_wrapper).burn(msg.sender, _amount);
-
+        uint256 _assetId = assetId(token, 0, gigaIndex, AssetType.ERC20);
         // @notice, zemse poseidon implementation can only handle up to 3 inputs, transferDataHash is just to get around that
-        uint256 commitment = Poseidon2.hash_3(_blindedRecipientDataHash, uint256(uint160(_wrapper)), _amount);
-        // TODO maybe picking which
-        uint256 commitmentLeaf = Poseidon2.hash_2(commitment, FUNGIBLE_DOMAIN);
-        SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, commitmentLeaf);
+        uint256 _commitment = Poseidon2.hash_3(_preCommitmentHash, _assetId, _amount);
+        SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
     }
 
     function unshieldErc20(address _wrapper, uint256 _amount, address _recipient) public {
-        address token = underlyingOf[_wrapper].token;
-        if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
-        // verify proof
-        // public inputs like amount, wrapper address, recipient, 
+        // address token = underlyingOf[_wrapper].token;
+        // if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
+        // // verify proof
+        // // public inputs like amount, wrapper address, recipient,
 
-        WarptoadERC20(_wrapper).mint(_recipient, _amount);
+        // WarptoadERC20(_wrapper).mint(_recipient, _amount);
     }
 
     //----------------------------
@@ -276,7 +263,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         );
 
         erc20WrapperOf[_token] = wrapper;
-        underlyingOf[wrapper] = Underlying({token: _token, chainWarpDomain: chainWarpDomain});
+        underlyingOf[wrapper] = Underlying({token: _token, chainWarpDomain: gigaIndex});
         emit ERC20WrapperCreated(_token, wrapper);
     }
 
@@ -358,7 +345,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         );
 
         erc1155WrapperOf[_collection] = wrapper;
-        underlyingOf[wrapper] = Underlying({token: _collection, chainWarpDomain: chainWarpDomain});
+        underlyingOf[wrapper] = Underlying({token: _collection, chainWarpDomain: gigaIndex});
         emit ERC1155WrapperCreated(_collection, wrapper);
     }
 }
