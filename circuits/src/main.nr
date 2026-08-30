@@ -4,7 +4,10 @@ use crate::merkle::{
     leaf_and_index_to_root, leaf_to_root, LeafAndIndexInclusionProof, LeafInclusionProof,
 };
 use eddsa::eddsa_verify;
-use poseidon::{poseidon2::Poseidon2, poseidon::PoseidonHasher};
+use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
+
+// toHex("GIGA_LEAF", {size:32})
+global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
 
 global CIRCUIT_SIZE: u32 = 4;
 global MAX_TREE_DEPTH: u32 = 32;
@@ -162,35 +165,42 @@ struct CommitmentDataInclusion<let MAX_DEPTH: u32> {
     commitmentData: CommitmentData,
     local_proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
     giga_proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
+    local_edge_index: Field,
 }
 
 fn hash_circuit_contract_storage(slots: [Field; 2]) -> Field {
     Poseidon2::hash(slots, slots.len())
 }
 
-/**                                       
- *              everything else + which asset and how much  
- *        note: contractAddr, amount are values in public,  
- *     during shield/unshield. But not during shielded tx           gigaRoot
- *                                                 |                  |      
- *                                                 |         commitmentTreeRoot
- *            Who owns it + what controls it       |        /               \                
- *                                |               commitment               otherLeafs..
- * to refer to recipient          |              /     |    \  
+/**                                                            # sender needs to share everything in commitment + preCommitmentHash, so: [shared_nonce, CIRCUIT_CONTRACT, asset_id, amount]. maybe also share inputs of asset_id idk. We could store that one time onchain so the encrypted blob wont be huge. owner knows owner_hash inputs, he is literally him
+ *                                                             /
+ *   # everything else + which asset and how much             /                        giga_root             
+ *   # note: contractAddr, amount are values in public,      /                        /         \
+ *   # during shield/unshield. But not during shielded tx   /                   giga_leaf       other_giga_leaves
+ *                                                   |     |                   /    |     \
+ *                                                   |     | commitmentTreeRoot local_  GIGA_LEAF_DOMAIN <- # without this you can confuse with a internal node
+ *            # Who owns it + what controls it       |     |/               \   edge_index      \                  
+ *                                |               commitment               otherLeafs..          \
+ * to refer to recipient          |              /     |    \                                  # needed to verify leaf_index since we need it for the nullifier
  * without knowing                |             /      |     \           
  * their chain or pubKey       preCommitmentHash    asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
  *         \                  /   |      \       \        \       
  *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(contractAddr,0,originGigaIndex,"ERC20"),erc721=keccak(contractAddr,nftId,originGigaIndex,"ERC721"),erc1155=keccak(contractAddr,nftId,"ERC1155")
  *        / |       |        \   nonce   CONTRACT  \
- *       / /        |         \                     circuit_contract_storage_hash
- *  spending  dest_giga_index  nullifier_secret                           /  
- *   PubKey                             |                                / 
- *   X and Y             derived from viewingKey              ex in join_split: preNullifier,                            
- *                       re-used! nullifier(nullifier_secret, leaf_index)    
+ *       / /        |         \      |               circuit_contract_storage_hash
+ *  spending  dest_giga_index  \   to blind commit                            |
+ *   PubKey                     \                                         # ex in join_split: pre_nullifier
+ *   X and y                   nullifier_secret                           # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
+ *                                   |                                    #   // taker_timer_start_pre_nullifier is to ensure, h(take_timer_pre_null, taker_null_secret) is not seen
+ *                                   |                                    #   // basically it checks. Taker you better not start ur unlock timer while closing this trade. Or worse timer is already over and funds gone!
+ *                                   |                                    # deferred_inclusion: pre_nullifier, deferred_root      
+ *                       # derived from viewingKey (or somewhere else?)                                         
+ *                       # re-used! nullifier(nullifier_secret, giga_index, leaf_index)    
 */
 fn hash_commitment_data(data: CommitmentData) -> CommitmentLeafHash {
     let owner_hash: OwnerHash = hash_owner_data(data.owner_data);
     //let circuit_contract_storage_hash = hash_circuit_contract_storage();
+    assert(false, "storage hash is still set to 0 retard");
     let pre_commitment_hash: PreCommitmentHash =
         hash_pre_commitment(owner_hash, data.shared_nonce, data.circuit_contract, 0);
     let commitment: CommitmentHash =
@@ -199,15 +209,21 @@ fn hash_commitment_data(data: CommitmentData) -> CommitmentLeafHash {
 }
 
 fn proof_commitment_to_local_root<let MAX_DEPTH: u32>(
-    data: CommitmentDataInclusion<MAX_DEPTH>,
+    data: CommitmentDataInclusion<MAX_DEPTH>
 ) -> Field {
     let commitment_leaf: CommitmentLeafHash = hash_commitment_data(data.commitmentData);
-    leaf_and_index_to_root(data.local_proof, commitment_leaf.inner)
+    leaf_and_index_to_root(data.local_proof, commitment_leaf.inner, data.local_edge_index)
+}
+
+fn hash_giga_leaf(local_root: Field, local_edge_index: Field) -> Field {
+    Poseidon2::hash([local_root, local_edge_index, GIGA_LEAF_DOMAIN], 3)
 }
 
 fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
     proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
     local_root: Field,
+    local_edge_index: Field,
+    giga_edge_index: Field,
     valid_giga_index_range: GigaIndexRange,
 ) -> Field {
     assert(
@@ -218,22 +234,26 @@ fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
         greater_or_equal(proof.index, valid_giga_index_range.end),
         "gigaProof index above valid_giga_index_range",
     );
-    leaf_and_index_to_root(proof, local_root)
+    let giga_leaf = hash_giga_leaf(local_root, local_edge_index);
+    leaf_and_index_to_root(proof, giga_leaf, giga_edge_index)
 }
 
 struct VerifiedCommitmentData {
     commitment: CommitmentData,
     local_root: Field,
     local_index: Field,
+    local_edge_index: Field,
     giga_root: Field,
-    giga_index: Field
+    giga_index: Field,
 }
 
 fn proof_root_of_commitments<let SIZE: u32>(
     commitment_proofs: [CommitmentDataInclusion<MAX_TREE_DEPTH>; SIZE],
     local_root: Field,
+    local_edge_index: Field,
+    giga_edge_index: Field,
     valid_giga_index_range: GigaIndexRange,
-    dest_giga_index: Field
+    dest_giga_index: Field,
 ) -> [VerifiedCommitmentData; SIZE] {
     let mut verified: [VerifiedCommitmentData; SIZE] = std::mem::zeroed();
     for index in 0..SIZE {
@@ -241,22 +261,26 @@ fn proof_root_of_commitments<let SIZE: u32>(
         verified[index].local_root = proof_commitment_to_local_root(commitment_proofs[index]);
         verified[index].local_index = commitment_proofs[index].local_proof.index;
         verified[index].commitment = commitment_proofs[index].commitmentData;
-        
+
         // giga
         // contract handed us `local_root` and if that matches our reproduced commit_local_root, we don't need to check the giga_root proof
         // this so the caller can just put all zeros in the giga_root proof
-        if (verified[index].local_root  != local_root) {
+        if (verified[index].local_root != local_root) {
             verified[index].giga_root = proof_local_root_to_giga_root(
                 commitment_proofs[index].giga_proof,
                 verified[index].local_root,
+                commitment_proofs[index].local_edge_index,
+                giga_edge_index,
                 valid_giga_index_range
             );
             verified[index].giga_index = commitment_proofs[index].giga_proof.index;
+            verified[index].local_edge_index = commitment_proofs[index].local_edge_index;
         } else {
             // no verifying the gigaProof, hand me zeros if you want.
-            // but no lying about your gigaIndex! we use that for nullifiers to protect against faeries with fake gold!!
+            // but no lying about your gigaIndex and local_edge_index! we use that for nullifiers to protect against faeries with fake gold!!
             verified[index].giga_root = 0x00;
             verified[index].giga_index = dest_giga_index;
+            verified[index].local_edge_index = local_edge_index;
         };
     }
     verified
@@ -291,10 +315,14 @@ struct GigaIndexRange {
 // TODO remember to pad timestamps a bit, by just waiting a extra random amount of time. So not to finger print txs proof time
 // TODO remember to domain separate fake nullifiers and commitments,
 fn main(
-    // TODO we pivot from warp_domain to giga_index, easier and allows us to build nullifiers with h(nullifier_secret, )
+    // never possible the read the exact time rn, but with these 2 you can get a range
+    proof_expire_time_stamp: pub Field,
+    historic_time_stamp: pub Field,
     dest_giga_index: pub Field,
     local_root: pub Field,
+    local_edge_index: pub Field,
     giga_root: pub Field,
+    giga_edge_index: pub Field,
     public_hash: pub Field,
     nullifiers: pub [Field; CIRCUIT_SIZE],
     new_commitments: pub [Field; CIRCUIT_SIZE],
@@ -312,15 +340,19 @@ fn main(
     let sig_hash: Field = hash_signature_inputs(
         SignedData { private: signed_data, public_hash: public_hash },
     );
-    assert(
-        verify_signature(owner_data, signed_data.signature, sig_hash),
-        "invalid signature",
-    );
+    assert(verify_signature(owner_data, signed_data.signature, sig_hash), "invalid signature");
     // @warning: THESE COMMITMENTS ARE NOT VERIFIED, only that commitment+proof = root, but THAT ROOT CAN BE INVALID
     // the `circuit_contract` functions below should check if those roots are valid!
     let spend_commitments_and_roots: [VerifiedCommitmentData; CIRCUIT_SIZE] =
         // local_root is passed here, ONLY TO SKIP giga_root proof checks. IT IS NOT VERIFIED
-        proof_root_of_commitments(spend_commitments, local_root, valid_giga_index_range, dest_giga_index);
+        proof_root_of_commitments(
+            spend_commitments,
+            local_root,
+            local_edge_index,
+            giga_edge_index,
+            valid_giga_index_range,
+            dest_giga_index,
+        );
 
     //
     //  @WARNING: the contract_circuits below need to at least verify 3 things:

@@ -34,7 +34,7 @@ enum AssetType {
  */
 contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     using SafeERC20 for IERC20;
-    
+
     SkinnyIMTDataStorage commitmentTree;
 
     string symbolPreFix;
@@ -60,6 +60,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
     /// @notice underlying tokens where wrapping is blocked (unwrapping is always allowed), only constructor and closeUndercollateralizedPool can add
     mapping(address underlying => bool closed) public closedPools;
+    mapping(uint256 localRoot => uint256 treeSize) public localRoots;
+    // can also contain syncRoot
+    mapping(uint256 gigaRoot => uint256 treeSize) public gigaRoots;
 
     event ERC20WrapperCreated(address indexed underlying, address indexed wrapper);
     event ERC1155WrapperCreated(address indexed underlying, address indexed wrapper);
