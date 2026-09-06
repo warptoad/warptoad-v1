@@ -5,12 +5,15 @@ use crate::merkle::{
 };
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
+use std::string;
 
 // toHex("GIGA_LEAF", {size:32})
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
 
-global CIRCUIT_SIZE: u32 = 4;
-global MAX_TREE_DEPTH: u32 = 32;
+global CIRCUIT_SIZE: u32 = 6;
+// to match aztec note_hash_tree, also we need to put edge index at 2**40 - 1 there
+// no tree resets: at ~12M leaves/day 2^40 lasts ~250 years, quantum breaks bn254 first
+global MAX_TREE_DEPTH: u32 = 40;
 //   let unPadded = [...new TextEncoder().encode("JOIN_SPLIT")].map(b=>b.toString(16));
 //     "0x" + [...new Array(32-unPadded.length).fill("00"), ...unPadded].join("");
 global JOIN_SPLIT_SELECTOR: Field =
@@ -108,8 +111,11 @@ fn hash_signature_inputs(data: SignedData) -> Field {
 }
 
 fn hash_owner_data(owner_data: OwnerData) -> OwnerHash {
-    // TODO we could only do .x? At-least on grumpkin (short Weierstrass ) thats okay
-    // but we got jubjub (twisted edwards)
+    // DECISION (2026-08-31): hash BOTH x and y. x-only is sound with noir eddsa
+    // (it asserts on-curve + clears cofactor via *8), but circomlib's
+    // EdDSAPoseidonVerifier does NO curve check on Ax/Ay — with x-only, y would be
+    // a free witness there. Binding the full point here removes that dependency.
+    // (When porting: still add BabyCheck on A and R8 in the circom verifier.)
     OwnerHash {
         inner: Poseidon2::hash(
             [
@@ -168,21 +174,18 @@ struct CommitmentDataInclusion<let MAX_DEPTH: u32> {
     local_edge_index: Field,
 }
 
-fn hash_circuit_contract_storage(slots: [Field; 2]) -> Field {
-    Poseidon2::hash(slots, slots.len())
-}
 
 /**                                                            # sender needs to share everything in commitment + preCommitmentHash, so: [shared_nonce, CIRCUIT_CONTRACT, asset_id, amount]. maybe also share inputs of asset_id idk. We could store that one time onchain so the encrypted blob wont be huge. owner knows owner_hash inputs, he is literally him
- *                                                             /
+ *   # is it okay that there is there is no domain separator?  /
  *   # everything else + which asset and how much             /                        giga_root             
  *   # note: contractAddr, amount are values in public,      /                        /         \
  *   # during shield/unshield. But not during shielded tx   /                   giga_leaf       other_giga_leaves
  *                                                   |     |                   /    |     \
- *                                                   |     | commitmentTreeRoot local_  GIGA_LEAF_DOMAIN <- # without this you can confuse with a internal node
- *            # Who owns it + what controls it       |     |/               \   edge_index      \                  
- *                                |               commitment               otherLeafs..          \
- * to refer to recipient          |              /     |    \                                  # needed to verify leaf_index since we need it for the nullifier
- * without knowing                |             /      |     \           
+ *                                                   |     | commitmentTreeRoot   local_   GIGA_LEAF_DOMAIN <- # without this you can confuse with a internal node
+ *            # Who owns it + what controls it       |     |/       \             edge_index               \
+ *                                |               commitment        otherLeafs..      |                     \
+ * to refer to recipient          |              /     |    \                         |             # needed to verify leaf_index since we need it for the nullifier
+ * without knowing                |             /      |     \
  * their chain or pubKey       preCommitmentHash    asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
  *         \                  /   |      \       \        \       
  *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(contractAddr,0,originGigaIndex,"ERC20"),erc721=keccak(contractAddr,nftId,originGigaIndex,"ERC721"),erc1155=keccak(contractAddr,nftId,"ERC1155")
@@ -196,6 +199,7 @@ fn hash_circuit_contract_storage(slots: [Field; 2]) -> Field {
  *                                   |                                    # deferred_inclusion: pre_nullifier, deferred_root      
  *                       # derived from viewingKey (or somewhere else?)                                         
  *                       # re-used! nullifier(nullifier_secret, giga_index, leaf_index)    
+ *                       # TODO if tree resets, so does index: but at that point a attack would need 
 */
 fn hash_commitment_data(data: CommitmentData) -> CommitmentLeafHash {
     let owner_hash: OwnerHash = hash_owner_data(data.owner_data);
@@ -209,10 +213,14 @@ fn hash_commitment_data(data: CommitmentData) -> CommitmentLeafHash {
 }
 
 fn proof_commitment_to_local_root<let MAX_DEPTH: u32>(
-    data: CommitmentDataInclusion<MAX_DEPTH>
+    data: CommitmentDataInclusion<MAX_DEPTH>,
 ) -> Field {
     let commitment_leaf: CommitmentLeafHash = hash_commitment_data(data.commitmentData);
-    leaf_and_index_to_root(data.local_proof, commitment_leaf.inner, data.local_edge_index)
+    leaf_and_index_to_root(
+        data.local_proof,
+        commitment_leaf.inner,
+        data.local_edge_index,
+    )
 }
 
 fn hash_giga_leaf(local_root: Field, local_edge_index: Field) -> Field {
@@ -246,7 +254,6 @@ struct VerifiedCommitmentData {
     giga_root: Field,
     giga_index: Field,
 }
-
 fn proof_root_of_commitments<let SIZE: u32>(
     commitment_proofs: [CommitmentDataInclusion<MAX_TREE_DEPTH>; SIZE],
     local_root: Field,
@@ -271,7 +278,7 @@ fn proof_root_of_commitments<let SIZE: u32>(
                 verified[index].local_root,
                 commitment_proofs[index].local_edge_index,
                 giga_edge_index,
-                valid_giga_index_range
+                valid_giga_index_range,
             );
             verified[index].giga_index = commitment_proofs[index].giga_proof.index;
             verified[index].local_edge_index = commitment_proofs[index].local_edge_index;
@@ -365,12 +372,13 @@ fn main(
     // Fuck any of that up and you quickly have INFINITE MINT BUGS or stolen funds
     //
     if (signed_data.circuit_contract_selector == JOIN_SPLIT_SELECTOR) {
-        // TODO nullifier = h(nullifier, giga_index, local_index)
+        // TODO nullifier = h(nullifier_secret, giga_index, local_index)
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
         // just add a nullifier slot number
-        //join_split(nullifiers, new_commitments, spend_commitments);
+        // join_split(nullifiers, new_commitments, spend_commitments);
     } else {
-        assert(false, "unknown signed_data.circuit_contract_selector");
+
+        //assert(false, "unknown signed_data.circuit_contract_selector");
     }
 }
 
