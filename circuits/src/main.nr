@@ -7,12 +7,13 @@ use crate::merkle::{
 };
 
 use crate::hashing::{
-    hash_circuit_contract_storage, hash_commitment, hash_giga_leaf, hash_owner, hash_pre_commitment,
-    hash_signature_inputs,
+    hash_circuit_contract_storage, hash_commitment, hash_giga_leaf, hash_nullifier, hash_owner,
+    hash_pre_commitment, hash_spend_signature_inputs,hash_circuit_contract_auth_sig,
 };
 
 use crate::constants::{
-    CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH,
+    CIRCUIT_CONTR_STORAGE_EMPTY_HASH, CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR,
+    MAX_TREE_DEPTH,CIRCUIT_CONTR_AUTH_SIZE
 };
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
@@ -71,6 +72,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     giga_first_valid_index: Field,
     giga_last_valid_index: Field,
     owner_hash: Field,
+    dest_giga_index: Field,
 ) -> [ProvenCommitment; SIZE] {
     let mut proven_commitments: [ProvenCommitment; SIZE] = std::mem::zeroed();
     for index in 0..SIZE {
@@ -97,6 +99,8 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
         if (proven_commitments[index].local_root == local_root) {
             // circuit contracts will get a 0x00 giga_root
             // proven_commitment.giga_root = 0x00;
+            // no lying about the giga_index!
+            proven_commitments[index].giga_leaf_index = dest_giga_index;
         } else {
             proven_commitments[index].giga_root = proof_local_root_to_giga_root(
                 spend_commitment.giga_proof,
@@ -106,6 +110,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
                 giga_first_valid_index,
                 giga_last_valid_index,
             );
+            proven_commitments[index].giga_leaf_index = spend_commitment.giga_proof.index;
         }
 
         proven_commitments[index].amount = spend_commitment.commitment.amount;
@@ -114,6 +119,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             spend_commitment.commitment.circuit_contr_selector;
         proven_commitments[index].circuit_contr_storage =
             spend_commitment.commitment.circuit_contr_storage;
+        proven_commitments[index].local_leaf_index = spend_commitment.local_proof.index;
     }
     proven_commitments
 }
@@ -156,7 +162,9 @@ struct CommitmentProofData {
 }
 
 struct CommitmentRecipientData {
+    owner_hash: Field,
     shared_nonce: Field,
+    circuit_contr_selector: Field,
     circuit_contr_storage: [Field; CIRCUIT_CONTR_STORAGE_SIZE],
     asset_id: Field,
     amount: Field,
@@ -171,6 +179,8 @@ pub struct ProvenCommitment {
     asset_id: Field,
     amount: Field,
     commitment_hash: Field,
+    giga_leaf_index: Field,
+    local_leaf_index: Field,
 }
 
 struct CommitmentSpendProof<let MAX_DEPTH: u32> {
@@ -222,7 +232,9 @@ fn main(
     // secret owner data
     spend_pub_key: PubKey, // who is spender
     nullifier_secret: Field, // how spender will derive nullifiers from
-    signature: Signature,
+    spend_signature: Signature,
+    auth_signature: Signature,
+    auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
     recipient_circuit_contr_selector: Field,
 ) {
     let owner_hash: Field = hash_owner(spend_pub_key, dest_giga_index, nullifier_secret);
@@ -237,14 +249,18 @@ fn main(
             giga_first_valid_index,
             giga_last_valid_index,
             owner_hash,
+            dest_giga_index,
         );
 
-    let sig_hash: Field = hash_signature_inputs(
+    let spend_sig_hash: Field = hash_spend_signature_inputs(
         public_hash,
         spend_commitments_and_roots,
         recipient_commitments_hashes,
     );
-    assert(verify_signature(spend_pub_key, signature, sig_hash), "invalid signature");
+    assert(verify_signature(spend_pub_key, spend_signature, spend_sig_hash), "invalid spend signature");
+
+    let auth_sig_hash: Field = hash_circuit_contract_auth_sig(auth_sig_inputs);
+    assert(verify_signature(spend_pub_key, spend_signature, auth_sig_hash), "invalid auth signature");
 
     let circuit_contr_storage_hashes: [Field; CIRCUIT_SIZE] =
         hash_storage_inputs(recipient_commitments);
@@ -272,8 +288,10 @@ fn main(
             recipient_commitments_hashes,
             recipient_commitments,
             spend_commitments_and_roots,
-            spend_pub_key,
             nullifier_secret,
+            auth_sig_inputs,
+            circuit_contr_storage_hashes,
+            owner_hash,
         )
     } else {
 
@@ -291,6 +309,75 @@ fn join_split<let SIZE: u32>(
     recipient_commitments_hashes: [Field; SIZE],
     recipient_commitments: [CommitmentRecipientData; SIZE],
     spend_commitments_and_roots: [ProvenCommitment; SIZE],
-    spend_pub_key: PubKey,
     nullifier_secret: Field,
-) {}
+    auth_sig_inputs: [Field;CIRCUIT_CONTR_AUTH_SIZE],
+    circuit_contr_storage_hashes: [Field; SIZE],
+    owner_hash: Field,
+) {
+    // only one asset at the time pls
+    let expected_asset_id: Field = spend_commitments_and_roots[0].asset_id;
+    let mut spendable: Field = 0;
+    let mut spend: Field = 0;
+    for index in 0..SIZE {
+        // maybe neurotic check. But have to double check before dropping
+        assert(
+            circuit_contr_storage_hashes[index] == CIRCUIT_CONTR_STORAGE_EMPTY_HASH,
+            "join split storage need to be empty",
+        );
+        // check root
+        if (spend_commitments_and_roots[index].giga_root == 0x00) {
+            assert(
+                spend_commitments_and_roots[index].local_root == local_root,
+                "spend was local only but does not match local_root from public inputs",
+            );
+        } else {
+            assert(
+                spend_commitments_and_roots[index].giga_root == giga_root,
+                "spend was *not* local and does not match giga_root from public inputs",
+            );
+        }
+        assert(
+            expected_asset_id == spend_commitments_and_roots[index].asset_id,
+            "spend_commitments does not contain all same assetIds",
+        );
+        assert(
+            expected_asset_id == recipient_commitments[index].asset_id,
+            "recipient_commitments does not contain all same assetIds",
+        );
+
+        let nullifier: Field = hash_nullifier(
+            nullifier_secret,
+            spend_commitments_and_roots[index].giga_leaf_index,
+            spend_commitments_and_roots[index].local_leaf_index,
+        );
+        assert(nullifier == nullifiers[index], "nullifier mismatch");
+
+        // track amounts
+        spendable += spend_commitments_and_roots[index].amount;
+        spend += recipient_commitments[index].amount;
+        // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
+        assert(
+            lower_or_equal(spend_commitments_and_roots[index].amount, spend),
+            "spend overflowed",
+        );
+
+        // TODO check that is chill that we basically call any other circuit_contract and not check its storage inputs
+        // @notice this also check owner
+        let pre_commitment_hash: Field = hash_pre_commitment(
+            owner_hash,
+            recipient_commitments[index].shared_nonce,
+            recipient_commitments[index].circuit_contr_selector,
+            circuit_contr_storage_hashes[index],
+        );
+        let recipient_commitment_hash: Field = hash_commitment(
+            pre_commitment_hash,
+            expected_asset_id,
+            recipient_commitments[index].amount,
+        );
+        assert(
+            recipient_commitment_hash == recipient_commitments_hashes[index],
+            "a commitment_hash from public inputs does not match the recipient_commitment inputs hashed in circuit",
+        );
+    }
+    assert(lower_or_equal(spend, spendable), "not enough funds");
+}

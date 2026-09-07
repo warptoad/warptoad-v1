@@ -1,4 +1,4 @@
-use crate::constants::{CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE};
+use crate::constants::{CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE,CIRCUIT_CONTR_AUTH_SIZE};
 use crate::{ProvenCommitment, PubKey};
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
@@ -29,7 +29,6 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  *                       # re-used! nullifier(nullifier_secret, giga_index, leaf_index)    
  *                       # TODO if tree resets, so does index: but at that point a attack would need 
 */
-
 pub fn hash_giga_leaf(local_root: Field, local_edge_index: Field) -> Field {
     Poseidon2::hash([local_root, local_edge_index, GIGA_LEAF_DOMAIN], 3)
 }
@@ -42,6 +41,12 @@ pub fn hash_circuit_contract_storage(
     circuit_contr_storage: [Field; CIRCUIT_CONTR_STORAGE_SIZE],
 ) -> Field {
     Poseidon2::hash(circuit_contr_storage, CIRCUIT_CONTR_STORAGE_SIZE)
+}
+
+pub fn hash_circuit_contract_auth_sig(
+    circuit_contr_storage: [Field; CIRCUIT_CONTR_AUTH_SIZE],
+) -> Field {
+    Poseidon2::hash(circuit_contr_storage, CIRCUIT_CONTR_AUTH_SIZE)
 }
 
 pub fn hash_pre_commitment(
@@ -63,7 +68,7 @@ pub fn hash_owner(spend_pub_key: PubKey, dest_giga_index: Field, nullifier_secre
     )
 }
 
-pub fn hash_signature_inputs(
+pub fn hash_spend_signature_inputs(
     public_hash: Field,
     spend_commitments: [ProvenCommitment; CIRCUIT_SIZE],
     recipient_commitments_hashes: [Field; CIRCUIT_SIZE],
@@ -76,4 +81,11 @@ pub fn hash_signature_inputs(
         inputs[CIRCUIT_SIZE + i] = recipient_commitments_hashes[i];
     }
     Poseidon2::hash(inputs, CIRCUIT_SIZE * 2 + offset)
+}
+
+pub fn hash_nullifier(nullifier_secret:Field, giga_leaf_index:Field, local_leaf_index:Field) -> Field {
+        Poseidon2::hash(
+        [nullifier_secret, giga_leaf_index, local_leaf_index],
+        3,
+    )
 }

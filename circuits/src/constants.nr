@@ -1,5 +1,6 @@
 use poseidon::poseidon2::Poseidon2;
 
+pub global CIRCUIT_CONTR_AUTH_SIZE: u32 = 3;
 pub global CIRCUIT_CONTR_STORAGE_SIZE: u32 = 3;
 pub global CIRCUIT_CONTR_STORAGE_EMPTY: [Field; CIRCUIT_CONTR_STORAGE_SIZE] = std::mem::zeroed();
 pub global CIRCUIT_CONTR_STORAGE_EMPTY_HASH: Field =
