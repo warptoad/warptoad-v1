@@ -55,11 +55,11 @@ fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
     giga_last_valid_index: Field,
 ) -> Field {
     assert(
-        lower_or_equal(proof.index, giga_first_valid_index),
+        greater_or_equal(proof.index, giga_last_valid_index),
         "gigaProof index below valid_giga_index_range",
     );
     assert(
-        greater_or_equal(proof.index, giga_last_valid_index),
+        lower_or_equal(proof.index, giga_last_valid_index),
         "gigaProof index above valid_giga_index_range",
     );
     let giga_leaf: Field = hash_giga_leaf(local_root, local_edge_index);
@@ -313,8 +313,7 @@ fn main(
             },
         )
     } else {
-
-        //assert(false, "unknown signed_data.circuit_contract_selector");
+        assert(false, "unknown signed_data.circuit_contract_selector");
     }
 }
 

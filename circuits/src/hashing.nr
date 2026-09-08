@@ -76,14 +76,13 @@ pub fn hash_spend_signature_inputs(
     spend_commitments: [ProvenCommitment; CIRCUIT_SIZE],
     recipient_commitments_hashes: [Field; CIRCUIT_SIZE],
 ) -> Field {
-    let mut inputs: [Field; CIRCUIT_SIZE * 2] = std::mem::zeroed();
-    for i in 0..(CIRCUIT_SIZE * 2) {
+    let mut inputs: [Field; CIRCUIT_SIZE * 2 + 1] = std::mem::zeroed();
+    for i in 0..CIRCUIT_SIZE {
         inputs[i] = spend_commitments[i].commitment_hash;
         inputs[CIRCUIT_SIZE + i] = recipient_commitments_hashes[i];
     }
-    let extra_inputs: u32 = 1;
     inputs[CIRCUIT_SIZE * 2] = public_hash;
-    Poseidon2::hash(inputs, CIRCUIT_SIZE * 2 + extra_inputs)
+    Poseidon2::hash(inputs, CIRCUIT_SIZE * 2 + 1)
 }
 
 pub fn hash_nullifier(
