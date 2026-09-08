@@ -7,8 +7,9 @@ use crate::merkle::{
 };
 
 use crate::hashing::{
-    hash_circuit_contract_auth_sig, hash_circuit_contract_storage, hash_commitment, hash_giga_leaf,
-    hash_nullifier, hash_owner, hash_pre_commitment, hash_spend_signature_inputs,
+    hash_circuit_contract_auth_sig, hash_circuit_contract_storage, hash_commitment,
+    hash_fake_commitment, hash_fake_nullifier, hash_giga_leaf, hash_nullifier, hash_owner,
+    hash_pre_commitment, hash_spend_signature_inputs,
 };
 
 use crate::constants::{
@@ -73,61 +74,70 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     giga_last_valid_index: Field,
     owner_hash: Field,
     dest_giga_index: Field,
+    actual_amount_spend_commitments: u32,
 ) -> [ProvenCommitment; SIZE] {
     let mut proven_commitments: [ProvenCommitment; SIZE] = std::mem::zeroed();
     for index in 0..SIZE {
         let spend_commitment: CommitmentSpendProof<MAX_DEPTH> = spend_commitments[index];
-        proven_commitments[index].circuit_contr_storage_hash =
-            hash_circuit_contract_storage(spend_commitment.commitment.circuit_contr_storage);
-        let pre_commitment_hash: Field = hash_pre_commitment(
-            owner_hash,
-            spend_commitment.commitment.shared_nonce,
-            spend_commitment.commitment.circuit_contr_selector,
-            proven_commitments[index].circuit_contr_storage_hash,
-        );
-        proven_commitments[index].commitment_hash = hash_commitment(
-            pre_commitment_hash,
-            spend_commitment.commitment.asset_id,
-            spend_commitment.commitment.amount,
-        );
-        proven_commitments[index].local_root = leaf_and_index_to_root(
-            spend_commitment.local_proof,
-            proven_commitments[index].commitment_hash,
-            giga_edge_index,
-        );
-        // this checks if proof is on same chain, in which case we skip giga_root checks
-        if (proven_commitments[index].local_root == local_root) {
-            // circuit contracts will get a 0x00 giga_root
-            // proven_commitment.giga_root = 0x00;
-            // no lying about the giga_index!
-            proven_commitments[index].giga_leaf_index = dest_giga_index;
-        } else {
-            proven_commitments[index].giga_root = proof_local_root_to_giga_root(
-                spend_commitment.giga_proof,
-                proven_commitments[index].local_root,
-                spend_commitment.local_edge_index,
-                giga_edge_index,
-                giga_first_valid_index,
-                giga_last_valid_index,
+        if (index <= actual_amount_spend_commitments) {
+            proven_commitments[index].circuit_contr_storage_hash =
+                hash_circuit_contract_storage(spend_commitment.commitment.circuit_contr_storage);
+            let pre_commitment_hash: Field = hash_pre_commitment(
+                owner_hash,
+                spend_commitment.commitment.shared_nonce,
+                spend_commitment.commitment.circuit_contr_selector,
+                proven_commitments[index].circuit_contr_storage_hash,
             );
-            proven_commitments[index].giga_leaf_index = spend_commitment.giga_proof.index;
+            proven_commitments[index].commitment_hash = hash_commitment(
+                pre_commitment_hash,
+                spend_commitment.commitment.asset_id,
+                spend_commitment.commitment.amount,
+            );
+            proven_commitments[index].local_root = leaf_and_index_to_root(
+                spend_commitment.local_proof,
+                proven_commitments[index].commitment_hash,
+                giga_edge_index,
+            );
+            // this checks if proof is on same chain, in which case we skip giga_root checks
+            if (proven_commitments[index].local_root == local_root) {
+                // circuit contracts will get a 0x00 giga_root
+                // proven_commitment.giga_root = 0x00;
+                // no lying about the giga_index!
+                proven_commitments[index].giga_leaf_index = dest_giga_index;
+            } else {
+                proven_commitments[index].giga_root = proof_local_root_to_giga_root(
+                    spend_commitment.giga_proof,
+                    proven_commitments[index].local_root,
+                    spend_commitment.local_edge_index,
+                    giga_edge_index,
+                    giga_first_valid_index,
+                    giga_last_valid_index,
+                );
+                proven_commitments[index].giga_leaf_index = spend_commitment.giga_proof.index;
+            }
+            proven_commitments[index].amount = spend_commitment.commitment.amount;
+            proven_commitments[index].asset_id = spend_commitment.commitment.asset_id;
+            proven_commitments[index].circuit_contr_selector =
+                spend_commitment.commitment.circuit_contr_selector;
+            proven_commitments[index].circuit_contr_storage =
+                spend_commitment.commitment.circuit_contr_storage;
+            proven_commitments[index].local_leaf_index = spend_commitment.local_proof.index;
+        } else {
+            // it's a fake commitment so we make a fake_commitment hash
+            // don't need this because this is not a commitment publicly inserted in the tree
+            // proven_commitments[index].commitment_hash =
+            //     hash_fake_commitment(spend_commitment.commitment.shared_nonce)
         }
-
-        proven_commitments[index].amount = spend_commitment.commitment.amount;
-        proven_commitments[index].asset_id = spend_commitment.commitment.asset_id;
-        proven_commitments[index].circuit_contr_selector =
-            spend_commitment.commitment.circuit_contr_selector;
-        proven_commitments[index].circuit_contr_storage =
-            spend_commitment.commitment.circuit_contr_storage;
-        proven_commitments[index].local_leaf_index = spend_commitment.local_proof.index;
+        // fake commitments do need a share_nonce to make their fake nullifier look random
+        proven_commitments[index].shared_nonce = spend_commitment.commitment.shared_nonce;
     }
     proven_commitments
 }
 
-fn verify_signature(spend_pub_key: PubKey, signature: Signature, sig_hash: Field) -> bool {
+fn verify_signature(pub_key: PubKey, signature: Signature, sig_hash: Field) -> bool {
     eddsa_verify::<PoseidonHasher>(
-        spend_pub_key.x,
-        spend_pub_key.y,
+        pub_key.x,
+        pub_key.y,
         signature.scalar,
         signature.x,
         signature.y,
@@ -171,6 +181,7 @@ pub struct ProvenCommitment {
     commitment_hash: Field,
     giga_leaf_index: Field,
     local_leaf_index: Field,
+    shared_nonce: Field,
 }
 
 struct CommitmentSpendProof<let MAX_DEPTH: u32> {
@@ -213,14 +224,17 @@ fn main(
     nullifiers: pub [Field; CIRCUIT_SIZE], // to make `spend_commitments` un spendable
     recipient_commitments_hashes: pub [Field; CIRCUIT_SIZE], // for recipient to use to spend in next proof
     recipient_commitments: [CommitmentRecipientData; CIRCUIT_SIZE],
+    actual_amount_recipient_commitments: u32,
     // proof
     spend_commitments: [CommitmentSpendProof<MAX_TREE_DEPTH>; CIRCUIT_SIZE], // to proof owner owns things
+    actual_amount_spend_commitments: u32, // might want to only consume 1 for example
     //signed_data: PrivateSignedData, // get rid of this. Just sign hash of all recipient_commitments + spend_commitments
     // bad actors can't use the signature to steal funds or nullify shit you didn't intend to nullify
     // add public_hash and withdraw address, contract calls, or abstracted accounts calls are now also solid
     // dont need timestamps, these are only used as source of truth not intent, same with root data
     // secret owner data
     spend_pub_key: PubKey, // who is spender
+    auth_pub_key: PubKey,
     nullifier_secret: Field, // how spender will derive nullifiers from
     spend_signature: Signature,
     // circuit contract call data
@@ -241,6 +255,7 @@ fn main(
             giga_last_valid_index,
             owner_hash,
             dest_giga_index,
+            actual_amount_spend_commitments,
         );
 
     let spend_sig_hash: Field = hash_spend_signature_inputs(
@@ -254,10 +269,7 @@ fn main(
     );
 
     let auth_sig_hash: Field = hash_circuit_contract_auth_sig(auth_sig_inputs);
-    assert(
-        verify_signature(spend_pub_key, spend_signature, auth_sig_hash),
-        "invalid auth signature",
-    );
+    assert(verify_signature(auth_pub_key, auth_signature, auth_sig_hash), "invalid auth signature");
     //
     //  @WARNING: the contract_circuits below need to at least verify 3 things:
     //      -every root in `spend_commitments_and_roots`, all contain valid roots
@@ -282,7 +294,9 @@ fn main(
                 nullifiers,
                 recipient_commitments_hashes,
                 recipient_commitments,
+                actual_amount_recipient_commitments,
                 spend_commitments_and_roots,
+                actual_amount_spend_commitments,
                 nullifier_secret,
                 auth_sig_inputs,
                 owner_hash,
@@ -303,7 +317,9 @@ pub struct CircuitContrInputs<let SIZE: u32> {
     nullifiers: [Field; SIZE],
     recipient_commitments_hashes: [Field; SIZE],
     recipient_commitments: [CommitmentRecipientData; SIZE],
+    actual_amount_recipient_commitments: u32,
     spend_commitments_and_roots: [ProvenCommitment; SIZE],
+    actual_amount_spend_commitments: u32,
     nullifier_secret: Field,
     auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
     owner_hash: Field,
@@ -314,71 +330,90 @@ fn hash_join_split_inputs<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) -> Fi
     CIRCUIT_CONTR_STORAGE_EMPTY_HASH
 }
 
+// TODO dummy nullifiers and commitment_hashes
 fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
     // only one asset at the time pls
     let expected_asset_id: Field = inputs.spend_commitments_and_roots[0].asset_id;
     let mut spendable: Field = 0;
     let mut spend: Field = 0;
     for index in 0..SIZE {
-        let spend_commitment = inputs.spend_commitments_and_roots[index];
-        let recipient_commitment = inputs.recipient_commitments[index];
-        // call another circuit contract. and get the storage_has
-        let mut recipient_storage_hash: Field = CIRCUIT_CONTR_STORAGE_EMPTY_HASH;
-        if (recipient_commitment.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
-            recipient_storage_hash = hash_join_split_inputs(inputs)
-        } else {
-            assert(false, "unknown circuit_contr_selector in recipient_commitments when trying to call a circuit contract");
-        };
-        // check root
-        if (spend_commitment.giga_root == 0x00) {
+        // ----------- spend commitment --------------------------
+        let spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[index];
+        let mut nullifier: Field = 0x00;
+        if (index <= inputs.actual_amount_spend_commitments) {
+            // check root
+            if (spend_commitment.giga_root == 0x00) {
+                assert(
+                    spend_commitment.local_root == inputs.local_root,
+                    "spend was local only but does not match local_root from public inputs",
+                );
+            } else {
+                assert(
+                    spend_commitment.giga_root == inputs.giga_root,
+                    "spend was *not* local and does not match giga_root from public inputs",
+                );
+            }
             assert(
-                spend_commitment.local_root == inputs.local_root,
-                "spend was local only but does not match local_root from public inputs",
+                expected_asset_id == spend_commitment.asset_id,
+                "spend_commitments does not contain all same assetIds",
             );
-        } else {
-            assert(
-                spend_commitment.giga_root == inputs.giga_root,
-                "spend was *not* local and does not match giga_root from public inputs",
-            );
-        }
-        assert(
-            expected_asset_id == spend_commitment.asset_id,
-            "spend_commitments does not contain all same assetIds",
-        );
-        assert(
-            expected_asset_id == recipient_commitment.asset_id,
-            "recipient_commitments does not contain all same assetIds",
-        );
 
-        let nullifier: Field = hash_nullifier(
-            inputs.nullifier_secret,
-            spend_commitment.giga_leaf_index,
-            spend_commitment.local_leaf_index,
-        );
+            nullifier = hash_nullifier(
+                inputs.nullifier_secret,
+                spend_commitment.giga_leaf_index,
+                spend_commitment.local_leaf_index,
+            );
+            spendable += spend_commitment.amount;
+        } else {
+            // we ignore it, and dont add it to spendable amount
+            // TODO make sure nullifier is fake and not trying to nullify someone else!
+            nullifier = hash_fake_nullifier(spend_commitment.shared_nonce);
+        }
         assert(nullifier == inputs.nullifiers[index], "nullifier mismatch");
 
-        // track amounts
-        spendable += spend_commitment.amount;
-        spend += recipient_commitment.amount;
-        // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
-        assert(
-            lower_or_equal(spend_commitment.amount, spend),
-            "spend overflowed",
-        );
+        // ------------- recipients commitment ----------------------------------------
+        let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
+        let mut recipient_commitment_hash: Field = 0x00;
+        if (index <= inputs.actual_amount_recipient_commitments) {
+            let mut recipient_storage_hash: Field = CIRCUIT_CONTR_STORAGE_EMPTY_HASH;
+            if (recipient_commitment.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
+                recipient_storage_hash = hash_join_split_inputs(inputs)
+            } else {
+                assert(
+                    false,
+                    "unknown circuit_contr_selector in recipient_commitments when trying to call a circuit contract",
+                );
+            };
+            assert(
+                expected_asset_id == recipient_commitment.asset_id,
+                "recipient_commitments does not contain all same assetIds",
+            );
 
-        // TODO check that is chill that we basically call any other circuit_contract and not check its storage inputs
-        // @notice this also check owner
-        let pre_commitment_hash: Field = hash_pre_commitment(
-            inputs.owner_hash,
-            recipient_commitment.shared_nonce,
-            recipient_commitment.circuit_contr_selector,
-            recipient_storage_hash,
-        );
-        let recipient_commitment_hash: Field = hash_commitment(
-            pre_commitment_hash,
-            expected_asset_id,
-            recipient_commitment.amount,
-        );
+            // track amounts
+            spend += recipient_commitment.amount;
+            // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
+            assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
+
+            // TODO hoist this out of here so other circuit contracts don't do double works hashing this and do the recipient_commitment_hash == inputs.recipient_commitments_hashes[index] check
+            // circuit contracts then only check
+            // expected_asset_id == recipient_commitment.asset_id
+            // recipient_storage_hash == recipient_commitment.circuit_contr_storage_hash
+            let pre_commitment_hash: Field = hash_pre_commitment(
+                recipient_commitment.owner_hash,
+                recipient_commitment.shared_nonce,
+                recipient_commitment.circuit_contr_selector,
+                recipient_storage_hash,
+            );
+            recipient_commitment_hash = hash_commitment(
+                pre_commitment_hash,
+                expected_asset_id,
+                recipient_commitment.amount,
+            );
+        } else {
+            // nothing spend
+            // TODO make sure emitted commitment is actually fake!
+            recipient_commitment_hash = hash_fake_commitment(recipient_commitment.shared_nonce);
+        }
         assert(
             recipient_commitment_hash == inputs.recipient_commitments_hashes[index],
             "a commitment_hash from public inputs does not match the recipient_commitment inputs hashed in circuit",

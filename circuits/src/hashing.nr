@@ -1,4 +1,4 @@
-use crate::constants::{CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE,CIRCUIT_CONTR_AUTH_SIZE};
+use crate::constants::{CIRCUIT_CONTR_AUTH_SIZE, CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE, FAKE_NULLIFIER_DOMAIN, FAKE_COMMITMENT_DOMAIN};
 use crate::{ProvenCommitment, PubKey};
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
@@ -83,9 +83,24 @@ pub fn hash_spend_signature_inputs(
     Poseidon2::hash(inputs, CIRCUIT_SIZE * 2 + offset)
 }
 
-pub fn hash_nullifier(nullifier_secret:Field, giga_leaf_index:Field, local_leaf_index:Field) -> Field {
-        Poseidon2::hash(
-        [nullifier_secret, giga_leaf_index, local_leaf_index],
-        3,
-    )
+pub fn hash_nullifier(
+    nullifier_secret: Field,
+    giga_leaf_index: Field,
+    local_leaf_index: Field,
+) -> Field {
+    Poseidon2::hash([nullifier_secret, giga_leaf_index, local_leaf_index], 3)
+}
+
+// this safe since nullifier have 3 inputs but we have 2 here.
+// @WARNING set message size to 3 and then bad actors can burn other people funds
+// they could create nullifier=h(leaked_shared_nonce, giga_leaf_index_that_happens_to_be_exactly_FAKE_NULLIFIER_DOMAIN, local_leaf_only_at_index_0)
+pub fn hash_fake_nullifier(nonce: Field) -> Field {
+    Poseidon2::hash([nonce, FAKE_NULLIFIER_DOMAIN], 2)
+}
+
+// 2 things that prevent infinite mint bugs here
+// FAKE_COMMITMENT_DOMAIN sits at asset_id, which is never a valid asset_id
+// commitment_hashes are 3 inputs not 2
+pub fn hash_fake_commitment(nonce: Field) -> Field {
+    Poseidon2::hash([nonce, FAKE_COMMITMENT_DOMAIN], 2)
 }
