@@ -7,13 +7,13 @@ use crate::merkle::{
 };
 
 use crate::hashing::{
-    hash_circuit_contract_storage, hash_commitment, hash_giga_leaf, hash_nullifier, hash_owner,
-    hash_pre_commitment, hash_spend_signature_inputs,hash_circuit_contract_auth_sig,
+    hash_circuit_contract_auth_sig, hash_circuit_contract_storage, hash_commitment, hash_giga_leaf,
+    hash_nullifier, hash_owner, hash_pre_commitment, hash_spend_signature_inputs,
 };
 
 use crate::constants::{
-    CIRCUIT_CONTR_STORAGE_EMPTY_HASH, CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR,
-    MAX_TREE_DEPTH,CIRCUIT_CONTR_AUTH_SIZE
+    CIRCUIT_CONTR_AUTH_SIZE, CIRCUIT_CONTR_STORAGE_EMPTY_HASH, CIRCUIT_CONTR_STORAGE_SIZE,
+    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH,
 };
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
@@ -143,16 +143,6 @@ fn greater_or_equal(a: Field, b: Field) -> bool {
     !a.lt(b)
 }
 
-fn hash_storage_inputs<let SIZE: u32>(
-    commitments: [CommitmentRecipientData; SIZE],
-) -> [Field; SIZE] {
-    let mut hashes: [Field; SIZE] = std::mem::zeroed();
-    for index in 0..SIZE {
-        hashes[index] = hash_circuit_contract_storage(commitments[index].circuit_contr_storage);
-    }
-    hashes
-}
-
 struct CommitmentProofData {
     shared_nonce: Field,
     circuit_contr_selector: Field,
@@ -165,7 +155,7 @@ struct CommitmentRecipientData {
     owner_hash: Field,
     shared_nonce: Field,
     circuit_contr_selector: Field,
-    circuit_contr_storage: [Field; CIRCUIT_CONTR_STORAGE_SIZE],
+    circuit_contr_input: [Field; CIRCUIT_CONTR_STORAGE_SIZE],
     asset_id: Field,
     amount: Field,
 }
@@ -233,6 +223,7 @@ fn main(
     spend_pub_key: PubKey, // who is spender
     nullifier_secret: Field, // how spender will derive nullifiers from
     spend_signature: Signature,
+    // circuit contract call data
     auth_signature: Signature,
     auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
     recipient_circuit_contr_selector: Field,
@@ -257,13 +248,16 @@ fn main(
         spend_commitments_and_roots,
         recipient_commitments_hashes,
     );
-    assert(verify_signature(spend_pub_key, spend_signature, spend_sig_hash), "invalid spend signature");
+    assert(
+        verify_signature(spend_pub_key, spend_signature, spend_sig_hash),
+        "invalid spend signature",
+    );
 
     let auth_sig_hash: Field = hash_circuit_contract_auth_sig(auth_sig_inputs);
-    assert(verify_signature(spend_pub_key, spend_signature, auth_sig_hash), "invalid auth signature");
-
-    let circuit_contr_storage_hashes: [Field; CIRCUIT_SIZE] =
-        hash_storage_inputs(recipient_commitments);
+    assert(
+        verify_signature(spend_pub_key, spend_signature, auth_sig_hash),
+        "invalid auth signature",
+    );
     //
     //  @WARNING: the contract_circuits below need to at least verify 3 things:
     //      -every root in `spend_commitments_and_roots`, all contain valid roots
@@ -279,19 +273,20 @@ fn main(
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
         // just add a nullifier slot number
         join_split(
-            local_root,
-            giga_root,
-            proof_expire_time_stamp,
-            historic_time_stamp,
-            public_hash,
-            nullifiers,
-            recipient_commitments_hashes,
-            recipient_commitments,
-            spend_commitments_and_roots,
-            nullifier_secret,
-            auth_sig_inputs,
-            circuit_contr_storage_hashes,
-            owner_hash,
+            CircuitContrInputs {
+                local_root,
+                giga_root,
+                proof_expire_time_stamp,
+                historic_time_stamp,
+                public_hash,
+                nullifiers,
+                recipient_commitments_hashes,
+                recipient_commitments,
+                spend_commitments_and_roots,
+                nullifier_secret,
+                auth_sig_inputs,
+                owner_hash,
+            },
         )
     } else {
 
@@ -299,7 +294,7 @@ fn main(
     }
 }
 
-fn join_split<let SIZE: u32>(
+pub struct CircuitContrInputs<let SIZE: u32> {
     local_root: Field,
     giga_root: Field,
     proof_expire_time_stamp: Field,
@@ -310,72 +305,82 @@ fn join_split<let SIZE: u32>(
     recipient_commitments: [CommitmentRecipientData; SIZE],
     spend_commitments_and_roots: [ProvenCommitment; SIZE],
     nullifier_secret: Field,
-    auth_sig_inputs: [Field;CIRCUIT_CONTR_AUTH_SIZE],
-    circuit_contr_storage_hashes: [Field; SIZE],
+    auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
     owner_hash: Field,
-) {
+}
+
+// this guy has no inputs!
+fn hash_join_split_inputs<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) -> Field {
+    CIRCUIT_CONTR_STORAGE_EMPTY_HASH
+}
+
+fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
     // only one asset at the time pls
-    let expected_asset_id: Field = spend_commitments_and_roots[0].asset_id;
+    let expected_asset_id: Field = inputs.spend_commitments_and_roots[0].asset_id;
     let mut spendable: Field = 0;
     let mut spend: Field = 0;
     for index in 0..SIZE {
-        // maybe neurotic check. But have to double check before dropping
-        assert(
-            circuit_contr_storage_hashes[index] == CIRCUIT_CONTR_STORAGE_EMPTY_HASH,
-            "join split storage need to be empty",
-        );
+        let spend_commitment = inputs.spend_commitments_and_roots[index];
+        let recipient_commitment = inputs.recipient_commitments[index];
+        // call another circuit contract. and get the storage_has
+        let mut recipient_storage_hash: Field = CIRCUIT_CONTR_STORAGE_EMPTY_HASH;
+        if (recipient_commitment.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
+            recipient_storage_hash = hash_join_split_inputs(inputs)
+        } else {
+            assert(false, "unknown circuit_contr_selector in recipient_commitments when trying to call a circuit contract");
+        };
         // check root
-        if (spend_commitments_and_roots[index].giga_root == 0x00) {
+        if (spend_commitment.giga_root == 0x00) {
             assert(
-                spend_commitments_and_roots[index].local_root == local_root,
+                spend_commitment.local_root == inputs.local_root,
                 "spend was local only but does not match local_root from public inputs",
             );
         } else {
             assert(
-                spend_commitments_and_roots[index].giga_root == giga_root,
+                spend_commitment.giga_root == inputs.giga_root,
                 "spend was *not* local and does not match giga_root from public inputs",
             );
         }
         assert(
-            expected_asset_id == spend_commitments_and_roots[index].asset_id,
+            expected_asset_id == spend_commitment.asset_id,
             "spend_commitments does not contain all same assetIds",
         );
         assert(
-            expected_asset_id == recipient_commitments[index].asset_id,
+            expected_asset_id == recipient_commitment.asset_id,
             "recipient_commitments does not contain all same assetIds",
         );
 
         let nullifier: Field = hash_nullifier(
-            nullifier_secret,
-            spend_commitments_and_roots[index].giga_leaf_index,
-            spend_commitments_and_roots[index].local_leaf_index,
+            inputs.nullifier_secret,
+            spend_commitment.giga_leaf_index,
+            spend_commitment.local_leaf_index,
         );
-        assert(nullifier == nullifiers[index], "nullifier mismatch");
+        assert(nullifier == inputs.nullifiers[index], "nullifier mismatch");
 
         // track amounts
-        spendable += spend_commitments_and_roots[index].amount;
-        spend += recipient_commitments[index].amount;
+        spendable += spend_commitment.amount;
+        spend += recipient_commitment.amount;
         // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
         assert(
-            lower_or_equal(spend_commitments_and_roots[index].amount, spend),
+            lower_or_equal(spend_commitment.amount, spend),
             "spend overflowed",
         );
 
         // TODO check that is chill that we basically call any other circuit_contract and not check its storage inputs
         // @notice this also check owner
         let pre_commitment_hash: Field = hash_pre_commitment(
-            owner_hash,
-            recipient_commitments[index].shared_nonce,
-            recipient_commitments[index].circuit_contr_selector,
-            circuit_contr_storage_hashes[index],
+            inputs.owner_hash,
+            recipient_commitment.shared_nonce,
+            recipient_commitment.circuit_contr_selector,
+            recipient_storage_hash,
         );
         let recipient_commitment_hash: Field = hash_commitment(
             pre_commitment_hash,
             expected_asset_id,
-            recipient_commitments[index].amount,
+            recipient_commitment.amount,
         );
         assert(
-            recipient_commitment_hash == recipient_commitments_hashes[index],
+            recipient_commitment_hash == inputs.recipient_commitments_hashes[index],
             "a commitment_hash from public inputs does not match the recipient_commitment inputs hashed in circuit",
         );
     }
