@@ -1,4 +1,7 @@
-use crate::constants::{CIRCUIT_CONTR_AUTH_SIZE, CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE, FAKE_NULLIFIER_DOMAIN, FAKE_COMMITMENT_DOMAIN};
+use crate::constants::{
+    CIRCUIT_CONTR_AUTH_SIZE, CIRCUIT_CONTR_STORAGE_SIZE, CIRCUIT_SIZE, FAKE_COMMITMENT_DOMAIN,
+    FAKE_NULLIFIER_DOMAIN,
+};
 use crate::{ProvenCommitment, PubKey};
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
@@ -74,13 +77,13 @@ pub fn hash_spend_signature_inputs(
     recipient_commitments_hashes: [Field; CIRCUIT_SIZE],
 ) -> Field {
     let mut inputs: [Field; CIRCUIT_SIZE * 2] = std::mem::zeroed();
-    let offset: u32 = 1;
-    inputs[0] = public_hash;
-    for i in offset..CIRCUIT_SIZE {
+    for i in 0..(CIRCUIT_SIZE * 2) {
         inputs[i] = spend_commitments[i].commitment_hash;
         inputs[CIRCUIT_SIZE + i] = recipient_commitments_hashes[i];
     }
-    Poseidon2::hash(inputs, CIRCUIT_SIZE * 2 + offset)
+    let extra_inputs: u32 = 1;
+    inputs[CIRCUIT_SIZE * 2] = public_hash;
+    Poseidon2::hash(inputs, CIRCUIT_SIZE * 2 + extra_inputs)
 }
 
 pub fn hash_nullifier(

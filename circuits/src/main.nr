@@ -69,6 +69,7 @@ fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
 fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     spend_commitments: [CommitmentSpendProof<MAX_DEPTH>; SIZE],
     local_root: Field,
+    local_edge_index: Field,
     giga_edge_index: Field,
     giga_first_valid_index: Field,
     giga_last_valid_index: Field,
@@ -79,7 +80,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     let mut proven_commitments: [ProvenCommitment; SIZE] = std::mem::zeroed();
     for index in 0..SIZE {
         let spend_commitment: CommitmentSpendProof<MAX_DEPTH> = spend_commitments[index];
-        if (index <= actual_amount_spend_commitments) {
+        if (index < actual_amount_spend_commitments) {
             proven_commitments[index].circuit_contr_storage_hash =
                 hash_circuit_contract_storage(spend_commitment.commitment.circuit_contr_storage);
             let pre_commitment_hash: Field = hash_pre_commitment(
@@ -96,14 +97,21 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             proven_commitments[index].local_root = leaf_and_index_to_root(
                 spend_commitment.local_proof,
                 proven_commitments[index].commitment_hash,
-                giga_edge_index,
+                // we trust local_edge_index for. Then verify it is the one from pub inputs if local_root==proven.local_root
+                // or we verify it by following the giga_proof
+                spend_commitment.local_edge_index,
             );
+
             // this checks if proof is on same chain, in which case we skip giga_root checks
             if (proven_commitments[index].local_root == local_root) {
                 // circuit contracts will get a 0x00 giga_root
                 // proven_commitment.giga_root = 0x00;
-                // no lying about the giga_index!
+                // no lying about the giga_index or local_edge_index used!
                 proven_commitments[index].giga_leaf_index = dest_giga_index;
+                assert(
+                    local_edge_index == spend_commitment.local_edge_index,
+                    "local proof skipped giga_proof but the local_edge_index was not matching the one from public inputs",
+                );
             } else {
                 proven_commitments[index].giga_root = proof_local_root_to_giga_root(
                     spend_commitment.giga_proof,
@@ -240,7 +248,6 @@ fn main(
     // circuit contract call data
     auth_signature: Signature,
     auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
-    recipient_circuit_contr_selector: Field,
 ) {
     let owner_hash: Field = hash_owner(spend_pub_key, dest_giga_index, nullifier_secret);
     // @warning: THESE COMMITMENTS ARE NOT VERIFIED, only that commitment+proof = root, but THAT ROOT CAN BE INVALID
@@ -250,6 +257,7 @@ fn main(
         proof_root_of_commitments(
             spend_commitments,
             local_root,
+            local_edge_index,
             giga_edge_index,
             giga_first_valid_index,
             giga_last_valid_index,
@@ -280,7 +288,9 @@ fn main(
     //
     // Fuck any of that up and you quickly have INFINITE MINT BUGS or stolen funds
     //
-    if (recipient_circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
+
+    // first one pick what to spend from
+    if (spend_commitments_and_roots[0].circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
         // TODO nullifier = h(nullifier_secret, giga_index, local_index)
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
         // just add a nullifier slot number
@@ -340,7 +350,7 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
         // ----------- spend commitment --------------------------
         let spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[index];
         let mut nullifier: Field = 0x00;
-        if (index <= inputs.actual_amount_spend_commitments) {
+        if (index < inputs.actual_amount_spend_commitments) {
             // check root
             if (spend_commitment.giga_root == 0x00) {
                 assert(
@@ -353,6 +363,11 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
                     "spend was *not* local and does not match giga_root from public inputs",
                 );
             }
+            // other checks
+            assert(
+                spend_commitment.circuit_contr_selector == JOIN_SPLIT_SELECTOR,
+                "The first commitment in spend_commitments was set to JOIN_SPLIT, but another was found set to a different circuit contract. Please only spend from one circuit contract at a time.",
+            );
             assert(
                 expected_asset_id == spend_commitment.asset_id,
                 "spend_commitments does not contain all same assetIds",
@@ -374,7 +389,7 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
         // ------------- recipients commitment ----------------------------------------
         let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
         let mut recipient_commitment_hash: Field = 0x00;
-        if (index <= inputs.actual_amount_recipient_commitments) {
+        if (index < inputs.actual_amount_recipient_commitments) {
             let mut recipient_storage_hash: Field = CIRCUIT_CONTR_STORAGE_EMPTY_HASH;
             if (recipient_commitment.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
                 recipient_storage_hash = hash_join_split_inputs(inputs)

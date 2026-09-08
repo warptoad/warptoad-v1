@@ -1,9 +1,9 @@
 use poseidon::poseidon2::Poseidon2;
 
 // asset_id, amount, expiry, ref_to_lock.
-// so set to 7 since poseidon2 cost scale per oder 4 with the first being 3 for size domain separation
-// tldr we need 4 inputs, might as well support 7 since no added cost
-pub global CIRCUIT_CONTR_AUTH_SIZE: u32 = 7;
+// so set to 7 since poseidon2 cost scale per order 4 with the first being 3 for size domain separation
+// tldr we need 4 inputs, might as well support 6 since no added cost
+pub global CIRCUIT_CONTR_AUTH_SIZE: u32 = 6;
 pub global CIRCUIT_CONTR_STORAGE_SIZE: u32 = 3;
 pub global CIRCUIT_CONTR_STORAGE_EMPTY: [Field; CIRCUIT_CONTR_STORAGE_SIZE] = std::mem::zeroed();
 pub global CIRCUIT_CONTR_STORAGE_EMPTY_HASH: Field =
