@@ -47,9 +47,9 @@ pub fn hash_circuit_contract_storage(
 }
 
 pub fn hash_circuit_contract_auth_sig(
-    circuit_contr_storage: [Field; CIRCUIT_CONTR_AUTH_SIZE],
+    auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
 ) -> Field {
-    Poseidon2::hash(circuit_contr_storage, CIRCUIT_CONTR_AUTH_SIZE)
+    Poseidon2::hash(auth_sig_inputs, CIRCUIT_CONTR_AUTH_SIZE)
 }
 
 pub fn hash_pre_commitment(

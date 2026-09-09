@@ -20,32 +20,6 @@ use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
 use std::string;
 
-/**                                                            # sender needs to share everything in commitment + preCommitmentHash, so: [shared_nonce, CIRCUIT_CONTRACT, asset_id, amount]. maybe also share inputs of asset_id idk. We could store that one time onchain so the encrypted blob wont be huge. owner knows owner_hash inputs, he is literally him
- *   # is it okay that there is there is no domain separator?  /
- *   # everything else + which asset and how much             /                        giga_root             
- *   # note: contractAddr, amount are values in public,      /                        /         \
- *   # during shield/unshield. But not during shielded tx   /                   giga_leaf       other_giga_leaves
- *                                                   |     |                   /    |     \
- *                                                   |     | commitmentTreeRoot   local_   GIGA_LEAF_DOMAIN <- # without this you can confuse with a internal node
- *            # Who owns it + what controls it       |     |/       \             edge_index               \
- *                                |               commitment        otherLeafs..      |                     \
- * to refer to recipient          |              /     |    \                         |             # needed to verify leaf_index since we need it for the nullifier
- * without knowing                |             /      |     \
- * their chain or pubKey       preCommitmentHash    asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
- *         \                  /   |      \       \        \       
- *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(contractAddr,0,originGigaIndex,"ERC20"),erc721=keccak(contractAddr,nftId,originGigaIndex,"ERC721"),erc1155=keccak(contractAddr,nftId,"ERC1155")
- *        / |       |        \   nonce   CONTRACT  \
- *       / /        |         \      |               circuit_contract_storage_hash
- *  spending  dest_giga_index  \   to blind commit                            |
- *   PubKey                     \                                         # ex in join_split: pre_nullifier
- *   X and y                   nullifier_secret                           # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
- *                                   |                                    #   // taker_timer_start_pre_nullifier is to ensure, h(take_timer_pre_null, taker_null_secret) is not seen
- *                                   |                                    #   // basically it checks. Taker you better not start ur unlock timer while closing this trade. Or worse timer is already over and funds gone!
- *                                   |                                    # deferred_inclusion: pre_nullifier, deferred_root      
- *                       # derived from viewingKey (or somewhere else?)                                         
- *                       # re-used! nullifier(nullifier_secret, giga_index, leaf_index)    
- *                       # TODO if tree resets, so does index: but at that point a attack would need 
-*/
 fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
     proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
     local_root: Field,
@@ -55,7 +29,7 @@ fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
     giga_last_valid_index: Field,
 ) -> Field {
     assert(
-        greater_or_equal(proof.index, giga_last_valid_index),
+        greater_or_equal(proof.index, giga_first_valid_index),
         "gigaProof index below valid_giga_index_range",
     );
     assert(
@@ -211,6 +185,15 @@ pub struct Signature {
     scalar: Field,
 }
 
+// every time asset_id == 0, this one not un_shielding
+// any index of unshielded_commitment corresponds to pub recipient_commitments_hashes
+// and those should get skipped in merkle tree insertion
+pub struct UnshieldingCommitment {
+    recipient: Field,
+    amount: Field,
+    asset_id: Field,
+}
+
 // TODO remember to pad timestamps a bit, by just waiting a extra random amount of time. So not to finger print txs proof time
 // TODO remember to domain separate fake nullifiers and commitments,
 fn main(
@@ -227,6 +210,7 @@ fn main(
     // owner data
     dest_giga_index: pub Field, // to verify owner is on this chains giga_index
     // call shit
+    unshielding_commitments: pub [UnshieldingCommitment; CIRCUIT_SIZE],
     public_hash: pub Field, // anything done in public is in here, encrypted blobs, contract calls, etc, attached to spenders signature and constrained to proof shared to relayer
     // zk pub data
     nullifiers: pub [Field; CIRCUIT_SIZE], // to make `spend_commitments` un spendable
@@ -276,8 +260,13 @@ fn main(
         "invalid spend signature",
     );
 
-    let auth_sig_hash: Field = hash_circuit_contract_auth_sig(auth_sig_inputs);
-    assert(verify_signature(auth_pub_key, auth_signature, auth_sig_hash), "invalid auth signature");
+    if (auth_sig_inputs != std::mem::zeroed()) {
+        let auth_sig_hash: Field = hash_circuit_contract_auth_sig(auth_sig_inputs);
+        assert(
+            verify_signature(auth_pub_key, auth_signature, auth_sig_hash),
+            "invalid auth signature",
+        );
+    }
     //
     //  @WARNING: the contract_circuits below need to at least verify 3 things:
     //      -every root in `spend_commitments_and_roots`, all contain valid roots
@@ -301,6 +290,7 @@ fn main(
                 proof_expire_time_stamp,
                 historic_time_stamp,
                 public_hash,
+                unshielding_commitments,
                 nullifiers,
                 recipient_commitments_hashes,
                 recipient_commitments,
@@ -315,6 +305,41 @@ fn main(
     } else {
         assert(false, "unknown signed_data.circuit_contract_selector");
     }
+
+    // @WARNING every circuit contract should either block unshield by doing assert(unshielding_commitment.asset_id == 0x00)
+    // or correctly check accounting on these unshielding_commitments
+    for index in 0..CIRCUIT_SIZE {
+        let unshielding_commitment: UnshieldingCommitment = unshielding_commitments[index];
+        let recipient_commitment: CommitmentRecipientData = recipient_commitments[index];
+
+        // only non fakes can unshield so only those get the asserts of: 
+        // unshielding_commitment.thing == recipient_commitment.thing
+        if (index < actual_amount_recipient_commitments) {
+            // now just check if pub inputs actually intent to unshield
+            if (unshielding_commitment.asset_id != 0x00) {
+                assert(
+                    unshielding_commitment.asset_id == recipient_commitment.asset_id,
+                    "unshielding_commitment asset_id mismatch",
+                );
+                assert(
+                    unshielding_commitment.amount == recipient_commitment.amount,
+                    "unshielding_commitment asset_id mismatch",
+                );
+                // note: sender does not usually know what pub_key the owner_hash has, we could add it so we can have more natural reading code
+                // where the unshielding public ethereum address is stored where normally we store the pub spending key
+                // but instead we just use the owner_hash instead so we skip adding inputs to recipient_commitments struct and addition poseidon2 hashes!
+                // afaik railgun solves this by just revealing the entire commitment leaf onchain, but that adds 3 poseidon2 hashes in solidity for us
+                // and 4 permutations in total. That is expensive!
+                assert(
+                    unshielding_commitment.recipient == recipient_commitment.owner_hash,
+                    "unshielding_commitment.recipient does not match recipient_commitment.owner_hash",
+                );
+            }
+        } else {
+            // fake is fake, no fake commitments unshielding into real money!!
+            assert(unshielding_commitment.asset_id == 0x00, "fake slot cannot unshield");
+        }
+    }
 }
 
 pub struct CircuitContrInputs<let SIZE: u32> {
@@ -322,6 +347,7 @@ pub struct CircuitContrInputs<let SIZE: u32> {
     giga_root: Field,
     proof_expire_time_stamp: Field,
     historic_time_stamp: Field,
+    unshielding_commitments: [UnshieldingCommitment; SIZE],
     public_hash: Field, // here you can constrain what is done in public
     nullifiers: [Field; SIZE],
     recipient_commitments_hashes: [Field; SIZE],
@@ -408,8 +434,9 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
             // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
             assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
 
-            // TODO hoist this out of here so other circuit contracts don't do double works hashing this and do the recipient_commitment_hash == inputs.recipient_commitments_hashes[index] check
-            // circuit contracts then only check
+            // TODO hoist this out of here so other circuit contracts don't do double works hashing like this
+            // and check here:
+            // recipient_commitment_hash == inputs.recipient_commitments_hashes[index]
             // expected_asset_id == recipient_commitment.asset_id
             // recipient_storage_hash == recipient_commitment.circuit_contr_storage_hash
             let pre_commitment_hash: Field = hash_pre_commitment(
@@ -425,7 +452,6 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
             );
         } else {
             // nothing spend
-            // TODO make sure emitted commitment is actually fake!
             recipient_commitment_hash = hash_fake_commitment(recipient_commitment.shared_nonce);
         }
         assert(
