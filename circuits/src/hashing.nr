@@ -47,9 +47,9 @@ pub fn hash_circuit_contract_storage(
 }
 
 pub fn hash_circuit_contract_auth_sig(
-    auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
+    inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
 ) -> Field {
-    Poseidon2::hash(auth_sig_inputs, CIRCUIT_CONTR_AUTH_SIZE)
+    Poseidon2::hash(inputs, CIRCUIT_CONTR_AUTH_SIZE)
 }
 
 pub fn hash_pre_commitment(
@@ -64,9 +64,9 @@ pub fn hash_pre_commitment(
     )
 }
 
-pub fn hash_owner(spend_pub_key: PubKey, dest_giga_index: Field, nullifier_secret: Field) -> Field {
+pub fn hash_owner(pub_key: PubKey, giga_index: Field, nullifier_secret: Field) -> Field {
     Poseidon2::hash(
-        [spend_pub_key.x, spend_pub_key.y, dest_giga_index, nullifier_secret],
+        [pub_key.x, pub_key.y, giga_index, nullifier_secret],
         4,
     )
 }

@@ -48,7 +48,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     giga_first_valid_index: Field,
     giga_last_valid_index: Field,
     owner_hash: Field,
-    dest_giga_index: Field,
+    current_giga_index: Field,
     actual_amount_spend_commitments: u32,
 ) -> [ProvenCommitment; SIZE] {
     let mut proven_commitments: [ProvenCommitment; SIZE] = std::mem::zeroed();
@@ -81,7 +81,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
                 // circuit contracts will get a 0x00 giga_root
                 // proven_commitment.giga_root = 0x00;
                 // no lying about the giga_index or local_edge_index used!
-                proven_commitments[index].giga_leaf_index = dest_giga_index;
+                proven_commitments[index].giga_leaf_index = current_giga_index;
                 assert(
                     local_edge_index == spend_commitment.local_edge_index,
                     "local proof skipped giga_proof but the local_edge_index was not matching the one from public inputs",
@@ -194,76 +194,100 @@ pub struct UnshieldingCommitment {
     asset_id: Field,
 }
 
-// TODO remember to pad timestamps a bit, by just waiting a extra random amount of time. So not to finger print txs proof time
-// TODO remember to domain separate fake nullifiers and commitments,
-fn main(
-    // root verify
-    local_root: pub Field, // to short circuit and skip giga_root check
-    local_edge_index: pub Field, // ^
-    giga_root: pub Field, // verify spend commitment
-    giga_edge_index: pub Field, // ^
-    giga_first_valid_index: pub Field, // ^
-    giga_last_valid_index: pub Field, // ^
+pub struct PubRootsAndIndexes {
+    local_root: Field, // to short circuit and skip giga_root check
+    local_edge_index: Field, // ^
+    giga_root: Field, // verify spend commitment
+    giga_edge_index: Field, // ^
+    giga_first_valid_index: Field, // ^
+    giga_last_valid_index: Field, // ^
+    current_giga_index: Field, // to verify owner is on this chains giga_index
+}
+pub struct TimeStamps {
     //timestamps: never possible the read the exact time rn, but with these 2 you can get a range
-    proof_expire_time_stamp: pub Field,
-    historic_time_stamp: pub Field,
-    // owner data
-    dest_giga_index: pub Field, // to verify owner is on this chains giga_index
-    // call shit
-    unshielding_commitments: pub [UnshieldingCommitment; CIRCUIT_SIZE],
-    public_hash: pub Field, // anything done in public is in here, encrypted blobs, contract calls, etc, attached to spenders signature and constrained to proof shared to relayer
-    // zk pub data
-    nullifiers: pub [Field; CIRCUIT_SIZE], // to make `spend_commitments` un spendable
-    recipient_commitments_hashes: pub [Field; CIRCUIT_SIZE], // for recipient to use to spend in next proof
-    recipient_commitments: [CommitmentRecipientData; CIRCUIT_SIZE],
+    proof_expire_time_stamp: Field,
+    historic_time_stamp: Field,
+}
+
+pub struct PubInputs<let SIZE: u32> {
+    roots: PubRootsAndIndexes,
+    time_stamps: TimeStamps,
+    public_hash: Field, // anything done in public is in here, encrypted blobs, contract calls, etc, attached to spenders signature and constrained to proof shared to relayer
+    unshielding_commitments: [UnshieldingCommitment; SIZE],
+    nullifiers: [Field; SIZE], // to make `spend_commitments` un spendable
+    recipient_commitments_hashes: [Field; SIZE],
+}
+
+pub struct OwnerInputs {
+    pub_key: PubKey,
+    nullifier_secret: Field,
+    signature: Signature
+}
+
+pub struct AuthInputs<let AUTH_HASH_SIZE:u32> {
+    pub_key: PubKey,
+    signature: Signature,
+    inputs: [Field; AUTH_HASH_SIZE]
+}
+
+pub struct PrivInputs<let DEPTH: u32, let SIZE: u32, let AUTH_HASH_SIZE: u32> {
+    recipient_commitments: [CommitmentRecipientData; SIZE],
     actual_amount_recipient_commitments: u32,
     // proof
-    spend_commitments: [CommitmentSpendProof<MAX_TREE_DEPTH>; CIRCUIT_SIZE], // to proof owner owns things
+    spend_commitments: [CommitmentSpendProof<DEPTH>; SIZE], // to proof owner owns things
     actual_amount_spend_commitments: u32, // might want to only consume 1 for example
     //signed_data: PrivateSignedData, // get rid of this. Just sign hash of all recipient_commitments + spend_commitments
     // bad actors can't use the signature to steal funds or nullify shit you didn't intend to nullify
     // add public_hash and withdraw address, contract calls, or abstracted accounts calls are now also solid
     // dont need timestamps, these are only used as source of truth not intent, same with root data
     // secret owner data
-    spend_pub_key: PubKey, // who is spender
-    auth_pub_key: PubKey,
-    nullifier_secret: Field, // how spender will derive nullifiers from
-    spend_signature: Signature,
-    // circuit contract call data
-    auth_signature: Signature,
-    auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
+    owner: OwnerInputs,
+    auth: AuthInputs<AUTH_HASH_SIZE>,
+    // for now just one selector instead of contract_selector + function_selector
+    // this selector is to validate the spend logic, join_split will call any circuit_contract with given inputs
+    // based on selectors and inputs in recipient_commitments
+    // you can only spend from one circuit_contract at the time, this is to make joins easier to implement
+    // since it's very chill to work with all the same spend_commitments, so you can just add up amounts
+    circuit_contr_selector: Field,
+}
+
+// TODO remember to pad timestamps a bit, by just waiting a extra random amount of time. So not to finger print txs proof time
+// TODO remember to domain separate fake nullifiers and commitments,
+fn main(
+    pub_in: pub PubInputs<CIRCUIT_SIZE>,
+    priv_in: PrivInputs<MAX_TREE_DEPTH, CIRCUIT_SIZE, CIRCUIT_CONTR_AUTH_SIZE>,
 ) {
-    let owner_hash: Field = hash_owner(spend_pub_key, dest_giga_index, nullifier_secret);
+    let owner_hash: Field = hash_owner(priv_in.owner.pub_key, pub_in.roots.current_giga_index, priv_in.owner.nullifier_secret);
     // @warning: THESE COMMITMENTS ARE NOT VERIFIED, only that commitment+proof = root, but THAT ROOT CAN BE INVALID
     // the `circuit_contract` functions below should check if those roots are valid!
     let spend_commitments_and_roots: [ProvenCommitment; CIRCUIT_SIZE] =
         // local_root is passed here, ONLY TO SKIP giga_root proof checks. IT IS NOT VERIFIED
         proof_root_of_commitments(
-            spend_commitments,
-            local_root,
-            local_edge_index,
-            giga_edge_index,
-            giga_first_valid_index,
-            giga_last_valid_index,
+            priv_in.spend_commitments,
+            pub_in.roots.local_root,
+            pub_in.roots.local_edge_index,
+            pub_in.roots.giga_edge_index,
+            pub_in.roots.giga_first_valid_index,
+            pub_in.roots.giga_last_valid_index,
             owner_hash,
-            dest_giga_index,
-            actual_amount_spend_commitments,
+            pub_in.roots.current_giga_index,
+            priv_in.actual_amount_spend_commitments,
         );
 
     let spend_sig_hash: Field = hash_spend_signature_inputs(
-        public_hash,
+        pub_in.public_hash,
         spend_commitments_and_roots,
-        recipient_commitments_hashes,
+        pub_in.recipient_commitments_hashes,
     );
     assert(
-        verify_signature(spend_pub_key, spend_signature, spend_sig_hash),
+        verify_signature(priv_in.owner.pub_key, priv_in.owner.signature, spend_sig_hash),
         "invalid spend signature",
     );
 
-    if (auth_sig_inputs != std::mem::zeroed()) {
-        let auth_sig_hash: Field = hash_circuit_contract_auth_sig(auth_sig_inputs);
+    if (priv_in.auth.inputs != std::mem::zeroed()) {
+        let auth_sig_hash: Field = hash_circuit_contract_auth_sig(priv_in.auth.inputs);
         assert(
-            verify_signature(auth_pub_key, auth_signature, auth_sig_hash),
+            verify_signature(priv_in.auth.pub_key, priv_in.auth.signature, auth_sig_hash),
             "invalid auth signature",
         );
     }
@@ -279,26 +303,26 @@ fn main(
     //
 
     // first one pick what to spend from
-    if (spend_commitments_and_roots[0].circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
+    if (priv_in.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
         // TODO nullifier = h(nullifier_secret, giga_index, local_index)
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
         // just add a nullifier slot number
         join_split(
             CircuitContrInputs {
-                local_root,
-                giga_root,
-                proof_expire_time_stamp,
-                historic_time_stamp,
-                public_hash,
-                unshielding_commitments,
-                nullifiers,
-                recipient_commitments_hashes,
-                recipient_commitments,
-                actual_amount_recipient_commitments,
-                spend_commitments_and_roots,
-                actual_amount_spend_commitments,
-                nullifier_secret,
-                auth_sig_inputs,
+                local_root: pub_in.roots.local_root,
+                giga_root: pub_in.roots.giga_root,
+                proof_expire_time_stamp: pub_in.time_stamps.proof_expire_time_stamp,
+                historic_time_stamp: pub_in.time_stamps.historic_time_stamp,
+                public_hash: pub_in.public_hash,
+                unshielding_commitments: pub_in.unshielding_commitments,
+                nullifiers: pub_in.nullifiers,
+                recipient_commitments_hashes: pub_in.recipient_commitments_hashes,
+                recipient_commitments: priv_in.recipient_commitments,
+                actual_amount_recipient_commitments: priv_in.actual_amount_recipient_commitments,
+                spend_commitments_and_roots: spend_commitments_and_roots,
+                actual_amount_spend_commitments: priv_in.actual_amount_spend_commitments,
+                nullifier_secret: priv_in.owner.nullifier_secret,
+                auth_sig_inputs: priv_in.auth.inputs,
                 owner_hash,
             },
         )
@@ -309,12 +333,12 @@ fn main(
     // @WARNING every circuit contract should either block unshield by doing assert(unshielding_commitment.asset_id == 0x00)
     // or correctly check accounting on these unshielding_commitments
     for index in 0..CIRCUIT_SIZE {
-        let unshielding_commitment: UnshieldingCommitment = unshielding_commitments[index];
-        let recipient_commitment: CommitmentRecipientData = recipient_commitments[index];
+        let unshielding_commitment: UnshieldingCommitment = pub_in.unshielding_commitments[index];
+        let recipient_commitment: CommitmentRecipientData = priv_in.recipient_commitments[index];
 
-        // only non fakes can unshield so only those get the asserts of: 
+        // only non fakes can unshield so only those get the asserts of:
         // unshielding_commitment.thing == recipient_commitment.thing
-        if (index < actual_amount_recipient_commitments) {
+        if (index < priv_in.actual_amount_recipient_commitments) {
             // now just check if pub inputs actually intent to unshield
             if (unshielding_commitment.asset_id != 0x00) {
                 assert(
@@ -405,7 +429,7 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
             );
             spendable += spend_commitment.amount;
         } else {
-            // we ignore it, and dont add it to spendable amount
+            // we ignore it, and don't add it to spendable amount
             // TODO make sure nullifier is fake and not trying to nullify someone else!
             nullifier = hash_fake_nullifier(spend_commitment.shared_nonce);
         }

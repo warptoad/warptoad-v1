@@ -20,6 +20,9 @@ importers:
       '@warptoad/skinny-imt.sol':
         specifier: 0.0.11
         version: 0.0.11
+      '@zkpassport/poseidon2':
+        specifier: 0.6.2
+        version: 0.6.2
       poseidon2-evm:
         specifier: ^2.0.0
         version: 2.0.0
