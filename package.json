@@ -5,7 +5,15 @@
   "scripts": {
     "compile": "hardhat compile",
     "test": "hardhat test",
-    "size": "hardhat compile && node scripts/size.ts"
+    "size": "hardhat compile && node scripts/size.ts",
+    "noir:compile": "cd circuits && nargo compile",
+    "noir:test": "cd circuits && nargo test",
+    "noir:gates": "cd circuits && bb gates -b ./target/warptoad_v1.json",
+    "noir:vk": "cd circuits && bb write_vk -b ./target/warptoad_v1.json -o ./target -t evm",
+    "noir:verifier": "cd circuits && bb write_solidity_verifier -k ./target/vk -o ./target/Verifier.sol -t evm",
+    "noir:cp-verifier": "cp circuits/target/Verifier.sol contracts/WarptoadVerifier.sol",
+    "noir:rename-verifier": "sed -i 's/^contract HonkVerifier is/contract WarptoadVerifier is/' contracts/WarptoadVerifier.sol",
+    "noir": "pnpm noir:compile && pnpm noir:vk && pnpm noir:verifier && pnpm noir:cp-verifier && pnpm noir:rename-verifier"
   },
   "devDependencies": {
     "@nomicfoundation/hardhat-ignition": "^3.1.8",
