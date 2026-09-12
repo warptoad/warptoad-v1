@@ -1,0 +1,11 @@
+{
+  "Warptoad": {
+    "chainSymbol": "eth",
+    "chainName": "Ethereum Sepolia",
+    "gigaIndex": 0,
+    "gigaFirstValidIndex": 0,
+    "gigaLastValidIndex": 0,
+    "blockedTokens": [],
+    "skinnyIMT": "0x00000066C760D24272a9E8A424EF7233A0F0da83"
+  }
+}

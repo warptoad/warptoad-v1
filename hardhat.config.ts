@@ -44,4 +44,10 @@ export default defineConfig({
       accounts: [configVariable("SEPOLIA_PRIVATE_KEY")],
     },
   },
+  verify: {
+    etherscan: {
+      // one key covers every chain on the Etherscan v2 api
+      apiKey: configVariable("ETHERSCAN_API_KEY"),
+    },
+  },
 });

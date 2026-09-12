@@ -6,6 +6,7 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "size": "hardhat compile && node scripts/size.ts",
+    "deploy:sepolia": "hardhat ignition deploy ignition/modules/Warptoad.ts --network sepolia --parameters ignition/parameters/sepolia.json --verify",
     "noir:compile": "cd circuits && nargo compile",
     "noir:test": "cd circuits && nargo test",
     "noir:gates": "cd circuits && bb gates -b ./target/warptoad_v1.json",

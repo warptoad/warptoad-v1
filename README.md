@@ -11,6 +11,38 @@ pnpm test      # hardhat test
 pnpm size      # contract size report
 ```
 
+### Deploy + verify on Sepolia
+
+Secrets go in the hardhat keystore once (plain env vars with the same names also work):
+
+```sh
+npx hardhat keystore set SEPOLIA_RPC_URL
+npx hardhat keystore set SEPOLIA_PRIVATE_KEY
+npx hardhat keystore set ETHERSCAN_API_KEY
+```
+
+deploy
+```sh
+pnpm deploy:sepolia   # ignition deploy + etherscan verify
+```
+
+Deploys `WarptoadVerifier` and `Warptoad` via `ignition/modules/Warptoad.ts`, linked to the
+already deployed `SkinnyIMTPoseidon2WriteStorage`. Addresses land in
+`ignition/deployments/chain-11155111/deployed_addresses.json`. Rerunning resumes, `--reset` starts over.
+
+Chain labels come from `ignition/parameters/sepolia.json` and become permanent token metadata
+(`wtUSDC@eth`), so for another chain copy them from `CHAIN_INFO` in `src/config.ts`.
+
+Wrapper tokens are deployed by `Warptoad` itself on first wrap, so they might not be automatically
+verified. In case you need one verified do:
+
+```sh
+npx hardhat verify --network sepolia --contract contracts/WarptoadERC20.sol:WarptoadERC20 \
+  <wrapper> <underlying> "<name>" "<symbol>" <decimals>
+```
+
+Same for ERC-1155 with `contracts/WarptoadERC1155.sol:WarptoadERC1155` and args `<underlying> "<name>" "<symbol>"`.
+
 ## Circuits
 
 ### Install Noir
