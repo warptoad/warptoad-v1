@@ -9,7 +9,7 @@ use crate::merkle::{
 use crate::hashing::{
     hash_circuit_contract_auth_sig, hash_circuit_contract_storage, hash_commitment,
     hash_fake_commitment, hash_fake_nullifier, hash_giga_leaf, hash_nullifier, hash_owner,
-    hash_pre_commitment, hash_spend_signature_inputs,
+    hash_pre_commitment, hash_public, hash_spend_signature_inputs,
 };
 
 use crate::constants::{
@@ -230,7 +230,14 @@ pub struct AuthInputs<let AUTH_HASH_SIZE:u32> {
     inputs: [Field; AUTH_HASH_SIZE]
 }
 
+/// see hash_public. `messages_hash` is here so a circuit contract can constrain what the sender put in the messages
+pub struct PublicHashPreimage {
+    messages_hash: Field,
+    other_hash: Field,
+}
+
 pub struct PrivInputs<let DEPTH: u32, let SIZE: u32, let AUTH_HASH_SIZE: u32> {
+    public_hash_preimage: PublicHashPreimage,
     recipient_commitments: [CommitmentRecipientData; SIZE],
     actual_amount_recipient_commitments: u32,
     // proof
@@ -258,6 +265,12 @@ fn main(
     priv_in: PrivInputs<MAX_TREE_DEPTH, CIRCUIT_SIZE, CIRCUIT_CONTR_AUTH_SIZE>,
 ) {
     let owner_hash: Field = hash_owner(priv_in.owner.pub_key, pub_in.roots.current_giga_index, priv_in.owner.nullifier_secret);
+    // the contract builds public_hash the same way, see Warptoad.hashPublic. Only the structure is checked for now
+    assert(
+        hash_public(priv_in.public_hash_preimage.messages_hash, priv_in.public_hash_preimage.other_hash)
+            == pub_in.public_hash,
+        "public_hash does not match its preimage",
+    );
     // @warning: THESE COMMITMENTS ARE NOT VERIFIED, only that commitment+proof = root, but THAT ROOT CAN BE INVALID
     // the `circuit_contract` functions below should check if those roots are valid!
     let spend_commitments_and_roots: [ProvenCommitment; CIRCUIT_SIZE] =

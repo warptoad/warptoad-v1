@@ -1,14 +1,12 @@
 /**
- * The simplest possible end to end run of the main circuit, all on one chain:
+ * The happy path again, but bob no longer "just knows" what alice sent him:
  *
- *   1. alice wraps USDC and shields 400 of it
- *   2. alice sends bob 300 shielded, keeps 100 as change
- *   3. bob unshields his 300 back into wrapped USDC
+ *   1. alice shields 400 to herself, with a note encrypted to her own view key
+ *   2. alice sends bob 300 and 100 change, one encrypted note per slot, fakes get garbage.
+ *      A relayer that swaps a message gets VerificationFailed, the messages are in public_hash
+ *   3. bob and alice scan every Message event from block 0 and find exactly their own notes
  *
- * Witness with noir_js, proof with bb.js, tree synced with skinny-fat-imt-js, secrets just pasted
- * around. No utxo management, no encrypted blobs, bob "just knows" what alice sent him.
- *
- * Needs `pnpm noir` first: the circuit json comes from circuits/target and the verifier from contracts/.
+ * Needs `pnpm noir` first, same as ClaudesLilHappyPath
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
@@ -40,9 +38,8 @@ import {
     recipientInput,
     spendInput,
     syncedTree,
-    unshieldInput,
 } from "../src/proving.js";
-import { publicHashOf } from "../src/messages.js";
+import { decryptNote, deriveViewKey, encryptNote, fakeMessage, getAllNotes, publicHashOf } from "../src/messages.js";
 import { deployCreate2, type Create2Artifact, deployCreate2Factory } from "@warptoad/skinny-fat-imt-js/create2";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
@@ -55,19 +52,15 @@ import poseidon2YulArtifact from "poseidon2-evm/out/Poseidon2Yul.sol/Poseidon2Yu
 
 const POSEIDON2_YUL = "0xB2542195Ad96AcfBC962C48A97D7640A9F5386D2" as const;
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
-// no encrypted blobs here, but the contract always hashes the messages into public_hash. See ClaudeLilMessaging.test.ts
-const NO_MESSAGES: Hex[] = ["0x", "0x", "0x", "0x"];
-const { hash: PUBLIC_HASH, preimage: PUBLIC_HASH_PREIMAGE } = publicHashOf(NO_MESSAGES);
-// the esm build of eddsa-poseidon trips over blakejs' cjs exports under node, the cjs build is fine
 const { derivePublicKey, signMessage } = createRequire(import.meta.url)("@zk-kit/eddsa-poseidon") as {
     derivePublicKey: typeof DerivePublicKey;
     signMessage: typeof SignMessage;
 };
 
-describe("ClaudesLilHappyPath", async function () {
+describe("ClaudeLilMessaging", async function () {
     const { viem } = await network.create();
     const publicClient = await viem.getPublicClient();
-    const [deployer, aliceWallet, bobWallet] = await viem.getWalletClients();
+    const [deployer, aliceWallet] = await viem.getWalletClients();
 
     let warptoad: WarptoadContract;
     let token: ContractReturnType<"MockERC20">;
@@ -78,18 +71,20 @@ describe("ClaudesLilHappyPath", async function () {
     let assetId: bigint;
     const gigaIndex = 0n;
 
-    // secrets, just pasted around
+    // one secret each, the view key is derived from it. Alice only ever learns bob's ownerHash and view public key
     const alice = {
         eddsaKey: "alice's eddsa key, any bytes work",
         nullifierSecret: 0xa11cen,
         pubKey: { x: 0n, y: 0n },
         ownerHash: 0n,
+        view: deriveViewKey("alice's eddsa key, any bytes work"),
     };
     const bob = {
         eddsaKey: "bob's eddsa key",
         nullifierSecret: 0xb0bn,
         pubKey: { x: 0n, y: 0n },
         ownerHash: 0n,
+        view: deriveViewKey("bob's eddsa key"),
     };
     for (const who of [alice, bob]) {
         const [x, y] = derivePublicKey(who.eddsaKey);
@@ -97,7 +92,6 @@ describe("ClaudesLilHappyPath", async function () {
         who.ownerHash = hashOwner({ spendPubKey: who.pubKey, destGigaIndex: gigaIndex, nullifierSecret: who.nullifierSecret });
     }
 
-    // the notes that exist during the story
     let aliceDeposit: Note;
     let bobNote: Note;
     let aliceChange: Note;
@@ -105,11 +99,6 @@ describe("ClaudesLilHappyPath", async function () {
     async function tree() {
         const expectedRoot = await warptoad.read.getSkinnyRoot([treeId]);
         return syncedTree(warptoad.address, publicClient, treeId, { expectedRoot });
-    }
-
-    async function timeStamps() {
-        const now = (await publicClient.getBlock()).timestamp;
-        return { proof_expire_time_stamp: now + 3600n, historic_time_stamp: now - 3600n };
     }
 
     before(async () => {
@@ -146,7 +135,20 @@ describe("ClaudesLilHappyPath", async function () {
         await bb.destroy();
     });
 
-    it("1. alice wraps and shields 400", async () => {
+    it("0. a note round trips, and only through the right key", async () => {
+        const note: Note = { ownerHash: bob.ownerHash, sharedNonce: 7n, assetId: 8n, amount: 9n };
+        const message = await encryptNote(note, bob.view.publicKey);
+        assert.deepEqual(await decryptNote(message, bob.view.privateKey), { ...note, ...recipientDefaults() });
+        assert.equal(await decryptNote(message, alice.view.privateKey), null);
+        assert.equal(await decryptNote(await fakeMessage(1n), bob.view.privateKey), null);
+        // the tag slot is there, still zero
+        assert.equal(message.slice(4, 4 + 64), "0".repeat(64));
+        // and a tiny note is as long as a huge one
+        const huge: Note = { ...note, ownerHash: (1n << 254n) - 1n, amount: (1n << 254n) - 1n };
+        assert.equal((await encryptNote(huge, bob.view.publicKey)).length, message.length);
+    });
+
+    it("1. alice wraps and shields 400, with a note to herself", async () => {
         await warptoad.write.wrapERC20([token.address, 1000n, aliceWallet.account.address], { account: aliceWallet.account });
         wrapper = await viem.getContractAt("WarptoadERC20", await warptoad.read.erc20WrapperOf([token.address]));
         assetId = await warptoad.read.hashAssetId([token.address, 0n, gigaIndex, 0]);
@@ -158,20 +160,20 @@ describe("ClaudesLilHappyPath", async function () {
             circuitContrSelector: JOIN_SPLIT_SELECTOR,
             circuitContrStorageHash: CIRCUIT_CONTR_STORAGE_EMPTY_HASH,
         });
-        await warptoad.write.shieldErc20([wrapper.address, 400n, preCommitmentHash, "0x"], { account: aliceWallet.account });
+        const message = await encryptNote(aliceDeposit, alice.view.publicKey);
+        await warptoad.write.shieldErc20([wrapper.address, 400n, preCommitmentHash, message], { account: aliceWallet.account });
 
-        assert.equal(await wrapper.read.balanceOf([aliceWallet.account.address]), 600n);
         assert.deepEqual((await tree()).leaves, [hashNote(aliceDeposit)]);
+        assert.deepEqual(await getAllNotes(warptoad, publicClient, alice.view.privateKey), [{ ...aliceDeposit, ...recipientDefaults() }]);
     });
 
-    it("2. alice sends bob 300 shielded, 100 change", async () => {
+    it("2. alice sends bob 300 and 100 change, messages included, relayer can't touch them", async () => {
         const localTree = await tree();
         const { proof: localProof, edgeIndex } = merkleProofInput(localTree, hashNote(aliceDeposit));
 
         bobNote = { ownerHash: bob.ownerHash, sharedNonce: 2001n, assetId, amount: 300n };
         aliceChange = { ownerHash: alice.ownerHash, sharedNonce: 2002n, assetId, amount: 100n };
         const recipients = [bobNote, aliceChange, fakeNote(2003n), fakeNote(2004n)];
-
         const recipientHashes = [
             hashNote(bobNote),
             hashNote(aliceChange),
@@ -184,26 +186,36 @@ describe("ClaudesLilHappyPath", async function () {
             hashFakeNullifier({ nonce: 2006n }),
             hashFakeNullifier({ nonce: 2007n }),
         ] as CircuitSizeFields;
-        // fake spend slots hash to 0 inside the circuit
+
+        // one message per slot, the fakes get one nobody can open
+        const messages: Hex[] = [
+            await encryptNote(bobNote, bob.view.publicKey),
+            await encryptNote(aliceChange, alice.view.publicKey),
+            await fakeMessage(2003n),
+            await fakeMessage(2004n),
+        ];
+        const { hash: publicHash, preimage: publicHashPreimage } = publicHashOf(messages);
+
         const sigHash = hashSpendSignatureInputs({
-            publicHash: PUBLIC_HASH,
+            publicHash,
             spendCommitmentHashes: [hashNote(aliceDeposit), 0n, 0n, 0n],
             recipientCommitmentHashes: recipientHashes,
         });
         const sig = signMessage(alice.eddsaKey, sigHash);
 
-        const ts = await timeStamps();
-        const { proof, publicInputs } = await prove(backend, circuit as CompiledCircuit, {
+        const now = (await publicClient.getBlock()).timestamp;
+        const ts = { proof_expire_time_stamp: now + 3600n, historic_time_stamp: now - 3600n };
+        const { proof } = await prove(backend, circuit as CompiledCircuit, {
             pub_in: {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
-                public_hash: PUBLIC_HASH,
+                public_hash: publicHash,
                 unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
             priv_in: {
-                public_hash_preimage: PUBLIC_HASH_PREIMAGE,
+                public_hash_preimage: publicHashPreimage,
                 recipient_commitments: recipients.map(function (n) {
                     return recipientInput(n);
                 }),
@@ -236,113 +248,37 @@ describe("ClaudesLilHappyPath", async function () {
             }),
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
-            messages: NO_MESSAGES,
+            messages,
             proof,
         };
-        // the contract lays public inputs out the same way bb did
-        const formatted = await warptoad.read.formatPublicInputs([
-            tx.roots, tx.timeStamps, PUBLIC_HASH, tx.unshieldingCommitments, tx.nullifiers, tx.recipientCommitmentsHashes,
-        ]);
-        assert.deepEqual(
-            formatted.map(function (x) {
-                return BigInt(x);
-            }),
-            publicInputs,
-        );
+        assert.equal(await warptoad.read.hashPublic([messages]), publicHash);
 
-        // anyone can relay it, deployer does here
+        // a relayer swapping bob's message for garbage changes public_hash, which alice signed.
+        // The generated verifier reverts with its own errors instead of returning false, so no VerificationFailed to match on
+        const tampered = { ...tx, messages: [await fakeMessage(666n), ...messages.slice(1)] };
+        await assert.rejects(warptoad.write.verifyShieldedTx([tampered]));
+        assert.deepEqual((await tree()).leaves, [hashNote(aliceDeposit)], "nothing got inserted");
+
         await warptoad.write.verifyShieldedTx([tx]);
-
-        assert.equal(await warptoad.read.nullifiers([nullifiers[0]]) > 0n, true, "alice's deposit is spent");
         assert.deepEqual((await tree()).leaves, [hashNote(aliceDeposit), ...recipientHashes]);
     });
 
-    it("3. bob unshields his 300", async () => {
+    it("3. bob and alice find their notes by scanning from block 0", async () => {
+        const bobNotes = await getAllNotes(warptoad, publicClient, bob.view.privateKey);
+        assert.deepEqual(bobNotes, [{ ...bobNote, ...recipientDefaults() }]);
+
+        const aliceNotes = await getAllNotes(warptoad, publicClient, alice.view.privateKey);
+        assert.deepEqual(aliceNotes, [aliceDeposit, aliceChange].map(function (n) {
+            return { ...n, ...recipientDefaults() };
+        }));
+
+        // and what bob found is really a leaf he can spend from
         const localTree = await tree();
-        const { proof: localProof, edgeIndex } = merkleProofInput(localTree, hashNote(bobNote));
-
-        // an unshield is a recipient note whose owner hash is bob's eth address, in slot 0
-        const bobAddress = bobWallet.account.address;
-        const unshieldNote: Note = { ownerHash: BigInt(bobAddress), sharedNonce: 0n, assetId, amount: 300n };
-        const recipients = [unshieldNote, fakeNote(3001n), fakeNote(3002n), fakeNote(3003n)];
-
-        const recipientHashes = [
-            hashNote(unshieldNote),
-            hashFakeCommitment({ nonce: 3001n }),
-            hashFakeCommitment({ nonce: 3002n }),
-            hashFakeCommitment({ nonce: 3003n }),
-        ] as CircuitSizeFields;
-        const nullifiers = [
-            hashNullifier({ nullifierSecret: bob.nullifierSecret, gigaLeafIndex: gigaIndex, localLeafIndex: localProof.index }),
-            hashFakeNullifier({ nonce: 3004n }),
-            hashFakeNullifier({ nonce: 3005n }),
-            hashFakeNullifier({ nonce: 3006n }),
-        ] as CircuitSizeFields;
-        const sigHash = hashSpendSignatureInputs({
-            publicHash: PUBLIC_HASH,
-            spendCommitmentHashes: [hashNote(bobNote), 0n, 0n, 0n],
-            recipientCommitmentHashes: recipientHashes,
-        });
-        const sig = signMessage(bob.eddsaKey, sigHash);
-
-        const ts = await timeStamps();
-        const { proof } = await prove(backend, circuit as CompiledCircuit, {
-            pub_in: {
-                roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
-                time_stamps: ts,
-                public_hash: PUBLIC_HASH,
-                unshielding_commitments: [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()],
-                nullifiers,
-                recipient_commitments_hashes: recipientHashes,
-            },
-            priv_in: {
-                public_hash_preimage: PUBLIC_HASH_PREIMAGE,
-                recipient_commitments: recipients.map(function (n) {
-                    return recipientInput(n);
-                }),
-                actual_amount_recipient_commitments: 1,
-                spend_commitments: [
-                    spendInput(bobNote, localProof, edgeIndex),
-                    fakeSpendInput(3004n),
-                    fakeSpendInput(3005n),
-                    fakeSpendInput(3006n),
-                ],
-                actual_amount_spend_commitments: 1,
-                owner: {
-                    pub_key: bob.pubKey,
-                    nullifier_secret: bob.nullifierSecret,
-                    signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
-                },
-                auth: noAuth(),
-                circuit_contr_selector: JOIN_SPLIT_SELECTOR,
-            },
-        });
-
-        const noTarget = { wrapper: ZERO_ADDRESS, id: 0n };
-        const tx = {
-            roots: { localRoot: localTree.root, localEdgeIndex: edgeIndex, gigaRoot: 0n, gigaEdgeIndex: 0n },
-            timeStamps: { proofExpireTimeStamp: ts.proof_expire_time_stamp, historicTimeStamp: ts.historic_time_stamp },
-            unshieldingCommitments: [
-                { recipient: BigInt(bobAddress), amount: 300n, assetId },
-                { recipient: 0n, amount: 0n, assetId: 0n },
-                { recipient: 0n, amount: 0n, assetId: 0n },
-                { recipient: 0n, amount: 0n, assetId: 0n },
-            ],
-            unshieldTargets: [{ wrapper: wrapper.address, id: 0n }, noTarget, noTarget, noTarget],
-            nullifiers: [...nullifiers],
-            recipientCommitmentsHashes: [...recipientHashes],
-            messages: NO_MESSAGES,
-            proof,
-        };
-        await warptoad.write.verifyShieldedTx([tx]);
-
-        assert.equal(await wrapper.read.balanceOf([bobAddress]), 300n, "bob got his wrapped USDC");
-        // the unshield note stayed out of the tree, the 3 fakes went in
-        const after = await tree();
-        assert.equal(after.size, 5 + 3);
-        assert.equal(after.indexOf(hashNote(unshieldNote)), -1);
-
-        // and bob can't do it twice
-        await assert.rejects(warptoad.write.verifyShieldedTx([tx]), /NullifierAlreadySpent/);
+        assert.notEqual(localTree.indexOf(hashNote(bobNotes[0])), -1);
     });
+
+    /** decryptNote always fills in the optional Note fields */
+    function recipientDefaults() {
+        return { circuitContrSelector: JOIN_SPLIT_SELECTOR, circuitContrStorage: [0n, 0n, 0n] };
+    }
 });

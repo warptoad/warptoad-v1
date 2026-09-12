@@ -8,7 +8,13 @@
  * (bn254, t=4). Verified against `Poseidon2::hash` for input sizes 2/3/4/6/9.
  */
 import { poseidon2Hash } from "@zkpassport/poseidon2";
+import { keccak256, type Hex } from "viem";
 import { FAKE_COMMITMENT_DOMAIN, FAKE_NULLIFIER_DOMAIN } from "./constants.js";
+
+/** mirror of `Warptoad.keccak31Byte`: keccak with the last byte dropped, so it fits in a 254 bit field */
+export function keccak31Byte(data: Hex): bigint {
+    return BigInt(keccak256(data)) >> 8n;
+}
 
 /** ascii "GIGA_LEAF", right-aligned in 32 bytes (defined in hashing.nr, not constants.nr) */
 export const GIGA_LEAF_DOMAIN =
@@ -112,6 +118,14 @@ export function hashSpendSignatureInputs({
     recipientCommitmentHashes: CircuitSizeFields;
 }): bigint {
     return poseidon2Hash([...spendCommitmentHashes, ...recipientCommitmentHashes, publicHash]);
+}
+
+/**
+ * `hash_public`: Poseidon2([messages_hash, other_hash]), the circuit's `public_hash`.
+ * `messagesHash` is keccak(messages) >> 8, see `hashMessages` in messages.ts. `otherHash` is 0 for now
+ */
+export function hashPublic({ messagesHash, otherHash }: { messagesHash: bigint; otherHash: bigint }): bigint {
+    return poseidon2Hash([messagesHash, otherHash]);
 }
 
 /** `hash_nullifier`: Poseidon2([nullifier_secret, giga_leaf_index, local_leaf_index]) */

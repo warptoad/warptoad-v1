@@ -74,7 +74,10 @@ struct ShieldedTx {
     UnshieldTarget[] unshieldTargets; // ignored (zeroes) where `unshieldingCommitments[i].assetId == 0`
     uint256[] nullifiers; // fakes included, all get stored
     uint256[] recipientCommitmentsHashes; // fakes included, inserted in the tree except unshielding slots
-    bytes proof; // of circuits/src/main.nr, `public_hash` is 0 for now
+    // one encrypted note per recipient slot, fakes and unshields included so every slot looks the same. See src/messages.ts
+    // bound to the proof through `public_hash`, so a relayer can't swap them
+    bytes[] messages;
+    bytes proof; // of circuits/src/main.nr, `public_hash` is `hashPublic(messages)`
 }
 
 /**
@@ -150,6 +153,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     event Nullified(uint256 indexed nullifier);
     // same TODO as Shielded
     event Unshielded(address indexed wrapper, address indexed recipient, uint256 assetId, uint256 amount);
+    /// @notice encrypted note for whoever owns `commitment`, only they can tell it is theirs. See src/messages.ts
+    /// one per inserted commitment, fakes too. Not indexed on purpose: wallets scan all of them
+    event Message(uint256 commitment, bytes message);
 
     /// @dev Thrown when unwrapping a token this vault did not issue, or issued for the other standard.
     error NotAWrapper(address token);
@@ -237,6 +243,12 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     }
     //--------------------------------------
 
+    /// @notice keccak with the last byte dropped, so it fits in a 254 bit field. Mirrored in src/hashing.ts
+    /// @dev internal, not public: the contract is at the EIP-170 limit and every selector counts
+    function keccak31Byte(bytes memory _data) internal pure returns (uint256) {
+        return uint256(keccak256(_data)) >> 8;
+    }
+
     /**
      * @notice public to save debugging headaches for sdk
      * @param contractAddr:
@@ -250,17 +262,28 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         uint256 originGigaIndex,
         AssetType assetType
     ) public pure returns (uint256) {
-        // >> 8 drops last byte so we fit in a 254 field!
-        return uint256(keccak256(abi.encode(contractAddr, id, originGigaIndex, assetType))) >> 8;
+        return keccak31Byte(abi.encode(contractAddr, id, originGigaIndex, assetType));
     }
 
     //--------- shielding -----------
     /**
+     * TODO: circuit contracts can be called here and just anything can be put into their storage
+     * // since no zk is checking that here. Can't constrain it to only be join_split here for example
+     * // since then we reveal owner_hash.
+     * // single chain and cross chain swap should not have a issue with this tho
+     * // person who locks is the one in control, and person who settles only read storage
+     * // pre-nullification might be fucked. But assetId is created here so we can just say in that "i am not pre-nullified"
+     * // i mean pre-nullification wont even use keccak for assetId, so it's good
+     * // just to be sure pre-nullification should use poseidon2(originalAssetId,0,originGigaIndex,"PRE_NULL_ERC20")
+     * // no commitment can be created here where "PRE_NULL_ERC20" is in assetId!
      * @param _wrapper: which wrapped token to shield
      * @param _amount: how much to shield
      * @param _preCommitmentHash: who will receive the shielded tokens, as a blinded hash
+     * @param _message: encrypted note for the recipient, see src/messages.ts
      */
-    function shieldErc20(address _wrapper, uint256 _amount, uint256 _preCommitmentHash) public {
+    function shieldErc20(address _wrapper, uint256 _amount, uint256 _preCommitmentHash, bytes calldata _message)
+        public
+    {
         address token = underlyingOf[_wrapper].token;
         if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
         // burn it, it is now shielded and can be unshielded on this or another chain, where a new wrapper token is minted :D
@@ -271,6 +294,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
         localRoots[newRoot] = index + 1;
         emit Shielded(_wrapper, _assetId, _amount, _commitment);
+        emit Message(_commitment, _message);
     }
 
     /**
@@ -278,8 +302,15 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * @param _id: which token id
      * @param _amount: how much of that id to shield
      * @param _preCommitmentHash: who will receive the shielded tokens, as a blinded hash
+     * @param _message: encrypted note for the recipient, see src/messages.ts
      */
-    function shieldErc1155(address _wrapper, uint256 _id, uint256 _amount, uint256 _preCommitmentHash) public {
+    function shieldErc1155(
+        address _wrapper,
+        uint256 _id,
+        uint256 _amount,
+        uint256 _preCommitmentHash,
+        bytes calldata _message
+    ) public {
         address collection = underlyingOf[_wrapper].token;
         if (collection == address(0) || erc1155WrapperOf[collection] != _wrapper) revert NotAWrapper(_wrapper);
         WarptoadERC1155(_wrapper).burn(msg.sender, _id, _amount);
@@ -288,6 +319,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
         localRoots[newRoot] = index + 1;
         emit Shielded(_wrapper, _assetId, _amount, _commitment);
+        emit Message(_commitment, _message);
     }
 
     /**
@@ -298,11 +330,13 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     function verifyShieldedTx(ShieldedTx calldata _tx) external nonReentrant {
         _spendNullifiers(_tx.nullifiers);
         _checkRootsAndTimeStamps(_tx.roots, _tx.timeStamps);
+        if (_tx.messages.length != CIRCUIT_SIZE) revert WrongCircuitSize(CIRCUIT_SIZE, _tx.messages.length);
 
         bytes32[] memory publicInputs = formatPublicInputs(
             _tx.roots,
             _tx.timeStamps,
-            0, // in the future this would contain encrypted blobs for recipient, and what ever you want to call upon unshielding
+            // the spender signed this inside the proof, so the relayer can't touch the messages
+            hashPublic(_tx.messages),
             _tx.unshieldingCommitments,
             _tx.nullifiers,
             _tx.recipientCommitmentsHashes
@@ -310,6 +344,18 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         if (!verifier.verify(_tx.proof, publicInputs)) revert VerificationFailed();
         // best save for last since it does expensive merkle tree inserts
         _insertOrUnshieldCommitments(_tx.unshieldingCommitments, _tx.unshieldTargets, _tx.recipientCommitmentsHashes);
+        for (uint256 i = 0; i < CIRCUIT_SIZE; i++) {
+            emit Message(_tx.recipientCommitmentsHashes[i], _tx.messages[i]);
+        }
+    }
+
+    /**
+     * @notice `public_hash` of the circuit, see `hash_public` in circuits/src/hashing.nr and `publicHashOf` in
+     * src/messages.ts. Everything a shielded tx does in public goes in here so it is covered by the spender's
+     * signature: Poseidon2(keccak(messages), keccak(other public things)). The second one is 0 until there are other things
+     */
+    function hashPublic(bytes[] calldata _messages) public view returns (uint256) {
+        return Poseidon2.hash_2(keccak31Byte(abi.encode(_messages)), 0);
     }
 
     function _checkRootsAndTimeStamps(PubRootsAndIndexes calldata _roots, TimeStamps calldata _timeStamps)
@@ -400,7 +446,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     /**
      * @notice lays out the public inputs in the order the circuit expects them, see `PubInputs` in circuits/src/main.nr
      * public so the sdk can debug against it
-     * @param _publicHash: what the circuit gets as `public_hash`. Unused for now so verifyShieldedTx passes 0
+     * @param _publicHash: what the circuit gets as `public_hash`, see hashPublic
      */
     function formatPublicInputs(
         PubRootsAndIndexes calldata _roots,

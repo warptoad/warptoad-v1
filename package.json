@@ -28,6 +28,8 @@
     "viem": "^2.55.19"
   },
   "dependencies": {
+    "@noble/curves": "1.9.1",
+    "@noble/hashes": "1.8.0",
     "@nomicfoundation/hardhat-viem": "^3.0.9",
     "@openzeppelin/contracts": "^5.6.1",
     "@warptoad/skinny-fat-imt-js": "0.0.8",

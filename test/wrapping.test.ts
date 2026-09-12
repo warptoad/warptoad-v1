@@ -344,7 +344,7 @@ describe("Warptoad", async function () {
         });
 
         it("burns the wrapper and inserts the commitment as a leaf", async () => {
-            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n]);
+            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n, "0x"]);
 
             const wrapper = await viem.getContractAt("WarptoadERC20", wrapperAddress);
             assert.equal(await wrapper.read.balanceOf([deployer.account.address]), 600n);
@@ -358,7 +358,7 @@ describe("Warptoad", async function () {
         });
 
         it("records every root with the tree size at that time", async () => {
-            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n]);
+            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n, "0x"]);
             const root = await warptoad.read.getSkinnyRoot([treeId]);
             assert.equal(await warptoad.read.localRoots([root]), 1n);
             assert.equal(await warptoad.read.localRoots([root + 1n]), 0n);
@@ -366,7 +366,7 @@ describe("Warptoad", async function () {
 
         it("rejects a token this vault did not issue", async () => {
             await assert.rejects(
-                warptoad.write.shieldErc20([token.address, 1n, 42n]),
+                warptoad.write.shieldErc20([token.address, 1n, 42n, "0x"]),
                 /NotAWrapper/,
             );
         });
@@ -431,7 +431,7 @@ describe("Warptoad", async function () {
             const wrapperAddress = await warptoad.read.erc1155WrapperOf([collection.address]);
             const wrapper = await viem.getContractAt("WarptoadERC1155", wrapperAddress);
 
-            await warptoad.write.shieldErc1155([wrapperAddress, 7n, 3n, 42n]);
+            await warptoad.write.shieldErc1155([wrapperAddress, 7n, 3n, 42n, "0x"]);
 
             assert.equal(await wrapper.read.balanceOf([deployer.account.address, 7n]), 1n);
             // AssetType.ERC1155 == 2, id goes in the slot ERC-20 leaves at 0
@@ -449,7 +449,7 @@ describe("Warptoad", async function () {
 
         const zeros = () => new Array<bigint>(CIRCUIT_SIZE).fill(0n);
         const noUnshield = () =>
-            new Array(CIRCUIT_SIZE).fill(null).map(() => ({ ownerHash: 0n, amount: 0n, assetId: 0n }));
+            new Array(CIRCUIT_SIZE).fill(null).map(() => ({ recipient: 0n, amount: 0n, assetId: 0n }));
         const noTargets = () =>
             new Array(CIRCUIT_SIZE).fill(null).map(() => ({
                 wrapper: "0x0000000000000000000000000000000000000000" as `0x${string}`,
@@ -470,6 +470,7 @@ describe("Warptoad", async function () {
             // nullifiers get stored before anything else is checked, so they have to be distinct
             nullifiers: [1n, 2n, 3n, 4n],
             recipientCommitmentsHashes: zeros(),
+            messages: new Array<`0x${string}`>(CIRCUIT_SIZE).fill("0x"),
             proof: "0x" as `0x${string}`,
         });
 
@@ -479,14 +480,14 @@ describe("Warptoad", async function () {
             await token.write.approve([warptoad.address, 1000n]);
             await warptoad.write.wrapERC20([token.address, 1000n, deployer.account.address]);
             wrapperAddress = await warptoad.read.erc20WrapperOf([token.address]);
-            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n]);
+            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n, "0x"]);
             root = await warptoad.read.getSkinnyRoot([await warptoad.read.commitmentTreeId()]);
             now = (await publicClient.getBlock()).timestamp;
         });
 
         it("lays out the public inputs in the circuit's order", async () => {
             const unshielding = noUnshield();
-            unshielding[1] = { ownerHash: 0x11n, amount: 0x12n, assetId: 0x13n };
+            unshielding[1] = { recipient: 0x11n, amount: 0x12n, assetId: 0x13n };
             const nullifiers = zeros();
             nullifiers[2] = 0x22n;
             const recipients = zeros();

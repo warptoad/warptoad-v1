@@ -77,7 +77,11 @@ export type OwnerInputs = { pub_key: PubKey; nullifier_secret: bigint; signature
 
 export type AuthInputs = { pub_key: PubKey; signature: SignatureInput; inputs: CircuitContrAuthSigInputs };
 
+/** `PublicHashPreimage`: Poseidon2 of these two is `public_hash`, see `publicHashOf` in messages.ts */
+export type PublicHashPreimageInput = { messages_hash: bigint; other_hash: bigint };
+
 export type PrivInputs = {
+    public_hash_preimage: PublicHashPreimageInput;
     recipient_commitments: CommitmentRecipientDataInput[];
     /** u32 in the circuit, so a number */
     actual_amount_recipient_commitments: number;

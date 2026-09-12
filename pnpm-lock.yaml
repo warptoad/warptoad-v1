@@ -8,6 +8,12 @@ importers:
 
   .:
     dependencies:
+      '@noble/curves':
+        specifier: 1.9.1
+        version: 1.9.1
+      '@noble/hashes':
+        specifier: 1.8.0
+        version: 1.8.0
       '@nomicfoundation/hardhat-viem':
         specifier: ^3.0.9
         version: 3.0.9(hardhat@3.14.0)(viem@2.55.19(typescript@6.0.3)(zod@3.25.76))
