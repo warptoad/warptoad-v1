@@ -4,6 +4,8 @@ import { network } from "hardhat";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 import type { WarptoadContract } from "../src/types.js";
 import { chainName, NAME_PREFIX, SYMBOL_PREFIX } from "../src/config.js";
+import { CIRCUIT_SIZE } from "../src/constants.js";
+import { hashCommitment } from "../src/hashing.js";
 import { deployCreate2, type Create2Artifact, deployCreate2Factory } from "@warptoad/skinny-fat-imt-js/create2"
 
 import { type Hex } from "viem";
@@ -17,10 +19,6 @@ import poseidon2YulArtifact from "poseidon2-evm/out/Poseidon2Yul.sol/Poseidon2Yu
  */
 const POSEIDON2_YUL = "0xB2542195Ad96AcfBC962C48A97D7640A9F5386D2" as const;
 
-/** poseidon2_bn254(1, 2), the placeholder commitment `shieldErc20` currently inserts. */
-const POSEIDON2_OF_1_AND_2 =
-    0x038682aa1cb5ae4e0a3f13da432a95c77c5c111f6f030faf9cad641ce1ed7383n;
-
 describe("Warptoad", async function () {
     const { viem } = await network.create();
     const publicClient = await viem.getPublicClient();
@@ -31,6 +29,7 @@ describe("Warptoad", async function () {
     let blocked: ContractReturnType<"MockERC20">;
     let gigaIndex: bigint;
     let skinnyIMT: any;
+    let verifier: ContractReturnType<"WarptoadVerifier">;
 
     before(async () => {
         await deployCreate2Factory(publicClient, deployer, deployer.account);
@@ -59,6 +58,8 @@ describe("Warptoad", async function () {
         // also contract needs to know it's index anyway!
         gigaIndex = BigInt(0n)
 
+        // generated from the circuit by `pnpm noir`
+        verifier = await viem.deployContract("WarptoadVerifier");
     });
 
     beforeEach(async () => {
@@ -73,6 +74,10 @@ describe("Warptoad", async function () {
                 chainLabels.symbol,
                 chainLabels.name,
                 gigaIndex,
+                verifier.address,
+                BigInt(CIRCUIT_SIZE),
+                0n, // gigaFirstValidIndex
+                0n, // gigaLastValidIndex
                 [blocked.address],
             ],
             {
@@ -115,6 +120,10 @@ describe("Warptoad", async function () {
                     chainLabels.symbol,
                     chainLabels.name,
                     gigaIndex,
+                    verifier.address,
+                    BigInt(CIRCUIT_SIZE),
+                    0n,
+                    0n,
                     [collection.address],
                 ],
                 {
@@ -340,11 +349,19 @@ describe("Warptoad", async function () {
             const wrapper = await viem.getContractAt("WarptoadERC20", wrapperAddress);
             assert.equal(await wrapper.read.balanceOf([deployer.account.address]), 600n);
 
-            // The placeholder commitment: whatever the etched Yul contract at POSEIDON2_YUL
-            // returns for hash_2(1, 2). Asserting the vector rather than trusting the etch means
-            // stale or wrong bytecode in node_modules fails here instead of passing silently.
+            // Computed with the js Poseidon2 (same one the circuit uses), so this also pins the
+            // etched Yul contract at POSEIDON2_YUL to the circuit's hash_3.
+            const assetId = await warptoad.read.assetId([token.address, 0n, gigaIndex, 0]);
+            const commitment = hashCommitment({ preCommitmentHash: 42n, assetId, amount: 400n });
             const leaves = await warptoad.read.getSkinnyLeaves([treeId, 0n, 1n]);
-            assert.deepEqual(leaves, [POSEIDON2_OF_1_AND_2]);
+            assert.deepEqual(leaves, [commitment]);
+        });
+
+        it("records every root with the tree size at that time", async () => {
+            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n]);
+            const root = await warptoad.read.getSkinnyRoot([treeId]);
+            assert.equal(await warptoad.read.localRoots([root]), 1n);
+            assert.equal(await warptoad.read.localRoots([root + 1n]), 0n);
         });
 
         it("rejects a token this vault did not issue", async () => {
@@ -407,6 +424,132 @@ describe("Warptoad", async function () {
             assert.equal(await wrapper.read.balanceOf([deployer.account.address, 7n]), 0n);
             assert.equal(await collection.read.balanceOf([deployer.account.address, 7n]), 10n);
             assert.equal(await collection.read.balanceOf([warptoad.address, 7n]), 0n);
+        });
+
+        it("shields an id and inserts the commitment as a leaf", async () => {
+            await warptoad.write.wrapERC1155([collection.address, 7n, 4n, deployer.account.address]);
+            const wrapperAddress = await warptoad.read.erc1155WrapperOf([collection.address]);
+            const wrapper = await viem.getContractAt("WarptoadERC1155", wrapperAddress);
+
+            await warptoad.write.shieldErc1155([wrapperAddress, 7n, 3n, 42n]);
+
+            assert.equal(await wrapper.read.balanceOf([deployer.account.address, 7n]), 1n);
+            // AssetType.ERC1155 == 2, id goes in the slot ERC-20 leaves at 0
+            const assetId = await warptoad.read.assetId([collection.address, 7n, gigaIndex, 2]);
+            const commitment = hashCommitment({ preCommitmentHash: 42n, assetId, amount: 3n });
+            const treeId = await warptoad.read.commitmentTreeId();
+            assert.deepEqual(await warptoad.read.getSkinnyLeaves([treeId, 0n, 1n]), [commitment]);
+        });
+    });
+    describe("verifyShieldedTx", () => {
+        let token: ContractReturnType<"MockERC20">;
+        let wrapperAddress: `0x${string}`;
+        let root: bigint;
+        let now: bigint;
+
+        const zeros = () => new Array<bigint>(CIRCUIT_SIZE).fill(0n);
+        const noUnshield = () =>
+            new Array(CIRCUIT_SIZE).fill(null).map(() => ({ recipient: 0n, amount: 0n, assetId: 0n }));
+        const noTargets = () =>
+            new Array(CIRCUIT_SIZE).fill(null).map(() => ({
+                wrapper: "0x0000000000000000000000000000000000000000" as `0x${string}`,
+                id: 0n,
+            }));
+
+        /** everything valid except the proof, so each test breaks one thing */
+        const validTx = () => ({
+            roots: {
+                localRoot: root,
+                localEdgeIndex: 0n,
+                gigaRoot: 0n,
+                gigaEdgeIndex: 0n,
+            },
+            timeStamps: { proofExpireTimeStamp: now + 3600n, historicTimeStamp: now - 3600n },
+            unshieldingCommitments: noUnshield(),
+            unshieldTargets: noTargets(),
+            // nullifiers get stored before anything else is checked, so they have to be distinct
+            nullifiers: [1n, 2n, 3n, 4n],
+            recipientCommitmentsHashes: zeros(),
+            proof: "0x" as `0x${string}`,
+        });
+
+        beforeEach(async () => {
+            token = await viem.deployContract("MockERC20", ["USD Coin", "USDC", 6]);
+            await token.write.mint([deployer.account.address, 1000n]);
+            await token.write.approve([warptoad.address, 1000n]);
+            await warptoad.write.wrapERC20([token.address, 1000n, deployer.account.address]);
+            wrapperAddress = await warptoad.read.erc20WrapperOf([token.address]);
+            await warptoad.write.shieldErc20([wrapperAddress, 400n, 42n]);
+            root = await warptoad.read.getSkinnyRoot([await warptoad.read.commitmentTreeId()]);
+            now = (await publicClient.getBlock()).timestamp;
+        });
+
+        it("lays out the public inputs in the circuit's order", async () => {
+            const unshielding = noUnshield();
+            unshielding[1] = { recipient: 0x11n, amount: 0x12n, assetId: 0x13n };
+            const nullifiers = zeros();
+            nullifiers[2] = 0x22n;
+            const recipients = zeros();
+            recipients[3] = 0x33n;
+
+            const inputs = await warptoad.read.formatPublicInputs([
+                { localRoot: 1n, localEdgeIndex: 2n, gigaRoot: 3n, gigaEdgeIndex: 4n },
+                { proofExpireTimeStamp: 7n, historicTimeStamp: 8n },
+                9n,
+                unshielding,
+                nullifiers,
+                recipients,
+            ]);
+            const asBigInt = inputs.map((x) => BigInt(x));
+
+            // 10 head fields, then 3 per unshielding slot, then nullifiers, then recipient commitments.
+            // giga valid index range (0, 0 here) and current giga index come from the contract, not calldata
+            assert.equal(asBigInt.length, 10 + CIRCUIT_SIZE * 5);
+            assert.deepEqual(asBigInt.slice(0, 10), [1n, 2n, 3n, 4n, 0n, 0n, gigaIndex, 7n, 8n, 9n]);
+            assert.deepEqual(asBigInt.slice(10 + 3, 10 + 6), [0x11n, 0x12n, 0x13n]);
+            assert.equal(asBigInt[10 + CIRCUIT_SIZE * 3 + 2], 0x22n);
+            assert.equal(asBigInt[10 + CIRCUIT_SIZE * 4 + 3], 0x33n);
+        });
+
+        it("rejects arrays that are not CIRCUIT_SIZE long", async () => {
+            const tx = validTx();
+            tx.nullifiers = [0n];
+            await assert.rejects(warptoad.write.verifyShieldedTx([tx]), /WrongCircuitSize/);
+        });
+
+        it("rejects a root the tree never had", async () => {
+            const tx = validTx();
+            tx.roots.localRoot = root + 1n;
+            await assert.rejects(warptoad.write.verifyShieldedTx([tx]), /UnknownLocalRoot/);
+        });
+
+        it("rejects an edge index that does not match the root's tree size", async () => {
+            const tx = validTx();
+            tx.roots.localEdgeIndex = 1n;
+            await assert.rejects(warptoad.write.verifyShieldedTx([tx]), /WrongLocalEdgeIndex/);
+        });
+
+        it("rejects an expired proof", async () => {
+            const tx = validTx();
+            tx.timeStamps.proofExpireTimeStamp = now - 1n;
+            await assert.rejects(warptoad.write.verifyShieldedTx([tx]), /ProofExpired/);
+        });
+
+        it("rejects a historic timestamp in the future", async () => {
+            const tx = validTx();
+            tx.timeStamps.historicTimeStamp = now + 1_000_000n;
+            await assert.rejects(warptoad.write.verifyShieldedTx([tx]), /HistoricTimeStampInFuture/);
+        });
+
+        it("reaches the verifier once everything else checks out", async () => {
+            // no prover in this test suite yet, so a garbage proof is as far as we get:
+            // the verifier itself must be the thing that rejects
+            await assert.rejects(
+                warptoad.write.verifyShieldedTx([validTx()]),
+                (err: Error) =>
+                    !/WrongCircuitSize|UnknownLocalRoot|WrongLocalEdgeIndex|ProofExpired|HistoricTimeStampInFuture|NullifierAlreadySpent/
+                        .test(String(err)),
+            );
         });
     });
 });

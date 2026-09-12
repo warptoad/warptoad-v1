@@ -3,7 +3,7 @@ mod hashing;
 mod constants;
 
 use crate::merkle::{
-    leaf_and_index_to_root, leaf_to_root, LeafAndIndexInclusionProof, LeafInclusionProof,
+    leaf_and_index_to_root, LeafAndIndexInclusionProof, LeafInclusionProof,
 };
 
 use crate::hashing::{

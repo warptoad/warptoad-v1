@@ -28,24 +28,24 @@ pub struct LeafAndIndexInclusionProof<let MAX_DEPTH: u32> {
 // we could have a not so expensive function that calculates the shortened "not really index" then
 // verify with this thing on a lower depth, which would be better then leaf_and_index_to_root
 // TODO re-read ur ramblings and do that i guess.
-pub fn leaf_to_root<let MAX_DEPTH: u32>(
-    proof: LeafInclusionProof<MAX_DEPTH>,
-    leaf: Field,
-) -> Field {
-    let index_bits: [bool; MAX_DEPTH] = proof.unconstrained_index.to_le_bits();
-    let mut node: Field = leaf;
-    for i in 0..proof.depth {
-        let sibling: Field = proof.siblings[i];
-        let mut left: Field = node;
-        let mut right: Field = sibling;
-        if index_bits[i] {
-            left = sibling;
-            right = node;
-        }
-        node = Poseidon2::hash([left, right], 2);
-    }
-    node
-}
+// pub fn leaf_to_root<let MAX_DEPTH: u32>(
+//     proof: LeafInclusionProof<MAX_DEPTH>,
+//     leaf: Field,
+// ) -> Field {
+//     let index_bits: [bool; MAX_DEPTH] = proof.unconstrained_index.to_le_bits();
+//     let mut node: Field = leaf;
+//     for i in 0..proof.depth {
+//         let sibling: Field = proof.siblings[i];
+//         let mut left: Field = node;
+//         let mut right: Field = sibling;
+//         if index_bits[i] {
+//             left = sibling;
+//             right = node;
+//         }
+//         node = Poseidon2::hash([left, right], 2);
+//     }
+//     node
+// }
 
 // this verifies the actual index and leaf, instead of only the leaf like in leaf_to_root
 // @warning edge_index (index of the last leaf, treeSize - 1) MUST come from a trusted source (contract, together with the root)!
