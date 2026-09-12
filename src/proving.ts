@@ -211,7 +211,9 @@ export function noUnshield(): UnshieldingCommitmentInput {
     return { recipient: 0n, amount: 0n, asset_id: 0n };
 }
 
-/** an unshield of `amount` of `assetId` to `recipient`, matching a recipient note with the address as owner hash */
+/**
+ * an unshield of `amount` of `assetId` to `recipient`
+ */
 export function unshieldInput(recipient: Address, assetId: bigint, amount: bigint): UnshieldingCommitmentInput {
     return { recipient: BigInt(recipient), amount, asset_id: assetId };
 }

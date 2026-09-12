@@ -145,7 +145,7 @@ describe("ClaudesLilHappyPath", async function () {
     it("1. alice wraps and shields 400", async () => {
         await warptoad.write.wrapERC20([token.address, 1000n, aliceWallet.account.address], { account: aliceWallet.account });
         wrapper = await viem.getContractAt("WarptoadERC20", await warptoad.read.erc20WrapperOf([token.address]));
-        assetId = await warptoad.read.assetId([token.address, 0n, gigaIndex, 0]);
+        assetId = await warptoad.read.hashAssetId([token.address, 0n, gigaIndex, 0]);
 
         aliceDeposit = { ownerHash: alice.ownerHash, sharedNonce: 1001n, assetId, amount: 400n };
         const preCommitmentHash = hashPreCommitment({

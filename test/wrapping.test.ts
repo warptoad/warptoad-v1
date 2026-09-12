@@ -351,7 +351,7 @@ describe("Warptoad", async function () {
 
             // Computed with the js Poseidon2 (same one the circuit uses), so this also pins the
             // etched Yul contract at POSEIDON2_YUL to the circuit's hash_3.
-            const assetId = await warptoad.read.assetId([token.address, 0n, gigaIndex, 0]);
+            const assetId = await warptoad.read.hashAssetId([token.address, 0n, gigaIndex, 0]);
             const commitment = hashCommitment({ preCommitmentHash: 42n, assetId, amount: 400n });
             const leaves = await warptoad.read.getSkinnyLeaves([treeId, 0n, 1n]);
             assert.deepEqual(leaves, [commitment]);
@@ -435,7 +435,7 @@ describe("Warptoad", async function () {
 
             assert.equal(await wrapper.read.balanceOf([deployer.account.address, 7n]), 1n);
             // AssetType.ERC1155 == 2, id goes in the slot ERC-20 leaves at 0
-            const assetId = await warptoad.read.assetId([collection.address, 7n, gigaIndex, 2]);
+            const assetId = await warptoad.read.hashAssetId([collection.address, 7n, gigaIndex, 2]);
             const commitment = hashCommitment({ preCommitmentHash: 42n, assetId, amount: 3n });
             const treeId = await warptoad.read.commitmentTreeId();
             assert.deepEqual(await warptoad.read.getSkinnyLeaves([treeId, 0n, 1n]), [commitment]);
@@ -449,7 +449,7 @@ describe("Warptoad", async function () {
 
         const zeros = () => new Array<bigint>(CIRCUIT_SIZE).fill(0n);
         const noUnshield = () =>
-            new Array(CIRCUIT_SIZE).fill(null).map(() => ({ recipient: 0n, amount: 0n, assetId: 0n }));
+            new Array(CIRCUIT_SIZE).fill(null).map(() => ({ ownerHash: 0n, amount: 0n, assetId: 0n }));
         const noTargets = () =>
             new Array(CIRCUIT_SIZE).fill(null).map(() => ({
                 wrapper: "0x0000000000000000000000000000000000000000" as `0x${string}`,
@@ -486,7 +486,7 @@ describe("Warptoad", async function () {
 
         it("lays out the public inputs in the circuit's order", async () => {
             const unshielding = noUnshield();
-            unshielding[1] = { recipient: 0x11n, amount: 0x12n, assetId: 0x13n };
+            unshielding[1] = { ownerHash: 0x11n, amount: 0x12n, assetId: 0x13n };
             const nullifiers = zeros();
             nullifiers[2] = 0x22n;
             const recipients = zeros();

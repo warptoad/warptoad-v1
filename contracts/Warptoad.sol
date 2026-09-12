@@ -52,7 +52,8 @@ struct TimeStamps {
 /// @dev one per recipient commitment slot, `assetId == 0` means that slot is a normal shielded commitment.
 /// Unshielding slots must come first: [unshield, unshield, normal, normal] is fine, [normal, unshield, ..] is not
 struct UnshieldingCommitment {
-    uint256 recipient; // eth address of who receives the unshielded tokens
+    // the recipient is stored where usually owner hash is stored
+    uint256 recipient;
     uint256 amount;
     uint256 assetId;
 }
@@ -68,7 +69,7 @@ struct ShieldedTx {
     PubRootsAndIndexes roots;
     TimeStamps timeStamps; // checked against block.timestamp
     // one per recipient slot, unshielding ones first. `assetId != 0` means: not inserted in the tree, but `amount`
-    // of `unshieldTargets[i]` is minted to `recipient`
+    // of `unshieldTargets[i]` is minted to `ownerHash` (an eth address when unshielding)
     UnshieldingCommitment[] unshieldingCommitments;
     UnshieldTarget[] unshieldTargets; // ignored (zeroes) where `unshieldingCommitments[i].assetId == 0`
     uint256[] nullifiers; // fakes included, all get stored
@@ -243,7 +244,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * @param originGigaIndex:
      * @param assetType:
      */
-    function assetId(
+    function hashAssetId(
         address contractAddr,
         uint256 id, // 0 for ERC20
         uint256 originGigaIndex,
@@ -264,7 +265,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
         // burn it, it is now shielded and can be unshielded on this or another chain, where a new wrapper token is minted :D
         WarptoadERC20(_wrapper).burn(msg.sender, _amount);
-        uint256 _assetId = assetId(token, 0, gigaIndex, AssetType.ERC20);
+        uint256 _assetId = hashAssetId(token, 0, gigaIndex, AssetType.ERC20);
         // @notice, zemse poseidon implementation can only handle up to 3 inputs, transferDataHash is just to get around that
         uint256 _commitment = Poseidon2.hash_3(_preCommitmentHash, _assetId, _amount);
         (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
@@ -282,7 +283,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         address collection = underlyingOf[_wrapper].token;
         if (collection == address(0) || erc1155WrapperOf[collection] != _wrapper) revert NotAWrapper(_wrapper);
         WarptoadERC1155(_wrapper).burn(msg.sender, _id, _amount);
-        uint256 _assetId = assetId(collection, _id, gigaIndex, AssetType.ERC1155);
+        uint256 _assetId = hashAssetId(collection, _id, gigaIndex, AssetType.ERC1155);
         uint256 _commitment = Poseidon2.hash_3(_preCommitmentHash, _assetId, _amount);
         (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
         localRoots[newRoot] = index + 1;
@@ -297,7 +298,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     function verifyShieldedTx(ShieldedTx calldata _tx) external nonReentrant {
         _spendNullifiers(_tx.nullifiers);
         _checkRootsAndTimeStamps(_tx.roots, _tx.timeStamps);
-        
+
         bytes32[] memory publicInputs = formatPublicInputs(
             _tx.roots,
             _tx.timeStamps,
@@ -366,8 +367,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     }
 
     /**
-     * @dev the circuit proved `_commitment` matches a recipient commitment owned by `_commitment.recipient`,
-     * here we only need to find out which wrapper `assetId` is and mint it
+     * @dev the circuit proved `_commitment` matches a recipient commitment owned by `_commitment.ownerHash`,
+     * which is only an eth address because this is an unshield. Here we only need to find out which wrapper
+     * `assetId` is and mint it
      */
     function _unshield(UnshieldingCommitment calldata _commitment, UnshieldTarget calldata _target) private {
         if (_commitment.recipient >> 160 != 0) revert RecipientNotAnAddress(_commitment.recipient);
@@ -378,12 +380,16 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         if (underlying.token == address(0)) revert NotAWrapper(wrapper);
         uint256 expectedAssetId;
         if (erc20WrapperOf[underlying.token] == wrapper) {
-            expectedAssetId = assetId(underlying.token, 0, underlying.chainWarpDomain, AssetType.ERC20);
-            if (expectedAssetId != _commitment.assetId) revert WrongAssetId(wrapper, expectedAssetId, _commitment.assetId);
+            expectedAssetId = hashAssetId(underlying.token, 0, underlying.chainWarpDomain, AssetType.ERC20);
+            if (expectedAssetId != _commitment.assetId) {
+                revert WrongAssetId(wrapper, expectedAssetId, _commitment.assetId);
+            }
             WarptoadERC20(wrapper).mint(recipient, _commitment.amount);
         } else if (erc1155WrapperOf[underlying.token] == wrapper) {
-            expectedAssetId = assetId(underlying.token, _target.id, underlying.chainWarpDomain, AssetType.ERC1155);
-            if (expectedAssetId != _commitment.assetId) revert WrongAssetId(wrapper, expectedAssetId, _commitment.assetId);
+            expectedAssetId = hashAssetId(underlying.token, _target.id, underlying.chainWarpDomain, AssetType.ERC1155);
+            if (expectedAssetId != _commitment.assetId) {
+                revert WrongAssetId(wrapper, expectedAssetId, _commitment.assetId);
+            }
             WarptoadERC1155(wrapper).mint(recipient, _target.id, _commitment.amount);
         } else {
             revert NotAWrapper(wrapper);
@@ -407,7 +413,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         uint256 size = CIRCUIT_SIZE;
         if (_unshieldingCommitments.length != size) revert WrongCircuitSize(size, _unshieldingCommitments.length);
         if (_nullifiers.length != size) revert WrongCircuitSize(size, _nullifiers.length);
-        if (_recipientCommitmentsHashes.length != size) revert WrongCircuitSize(size, _recipientCommitmentsHashes.length);
+        if (_recipientCommitmentsHashes.length != size) {
+            revert WrongCircuitSize(size, _recipientCommitmentsHashes.length);
+        }
 
         // head + unshielding (3 fields each) + nullifiers + recipient commitments
         publicInputs = new bytes32[](PUBLIC_INPUTS_HEAD + size * 5);
