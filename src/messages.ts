@@ -143,19 +143,20 @@ export function publicHashOf(messages: Hex[]): { hash: bigint; preimage: PublicH
 }
 
 /**
- * every note encrypted to `viewPrivateKey` in `warptoad`'s Message events, block 0 to now.
+ * every note encrypted to `viewPrivateKey` in `warptoad`'s Message events, `fromBlock` (default 0) to now.
  * No caching, one ECDH per message onchain, see NO_NOTE_TAG
  */
 export async function getAllNotes(
     warptoad: WarptoadContract,
     publicClient: PublicClient,
     viewPrivateKey: Uint8Array,
+    { fromBlock = 0n }: { fromBlock?: bigint } = {},
 ): Promise<Note[]> {
     const logs = await publicClient.getContractEvents({
         address: warptoad.address,
         abi: warptoad.abi,
         eventName: "Message",
-        fromBlock: 0n,
+        fromBlock,
         toBlock: "latest",
     });
     const notes: Note[] = [];

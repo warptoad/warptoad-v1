@@ -11,6 +11,18 @@ pnpm test      # hardhat test
 pnpm size      # contract size report
 ```
 
+### Gas
+
+`pnpm hardhat test test/ClaudeLilMessaging.test.ts --gas-stats`, CIRCUIT_SIZE 4:
+
+| | gas |
+| --- | --- |
+| `WarptoadVerifier.verify` on its own (8.7 KB proof, 30 public inputs) | ~875k, ~150k of that is calldata |
+| `verifyShieldedTx` (1 spend, 1 unshield, 3 tree inserts) | ~1.37M |
+| `shieldErc20` | ~211k |
+| `wrapERC20` first time (deploys the wrapper) | ~756k |
+| deploy `Warptoad` / `WarptoadVerifier` | 5.5M / 3.6M |
+
 ### Deploy + verify on Sepolia
 
 Secrets go in the hardhat keystore once (plain env vars with the same names also work):
@@ -22,6 +34,7 @@ npx hardhat keystore set ETHERSCAN_API_KEY
 ```
 
 deploy
+
 ```sh
 pnpm deploy:sepolia   # ignition deploy + etherscan verify
 ```
@@ -37,11 +50,18 @@ Wrapper tokens are deployed by `Warptoad` itself on first wrap, so they might no
 verified. In case you need one verified do:
 
 ```sh
-npx hardhat verify --network sepolia --contract contracts/WarptoadERC20.sol:WarptoadERC20 \
-  <wrapper> <underlying> "<name>" "<symbol>" <decimals>
+pnpm verify:wrapper:sepolia 0xfc632092084235675bebe56263976397959a0ff7
 ```
 
-Same for ERC-1155 with `contracts/WarptoadERC1155.sol:WarptoadERC1155` and args `<underlying> "<name>" "<symbol>"`.
+Works for ERC-20 and ERC-1155 wrappers, the constructor args are read back from chain (`scripts/verifyWrapper.ts`).
+
+To send real txs to the deployment, `test/ClaudeLilMessaging.test.ts` also runs against it. Use
+`hardhat run`, not `hardhat test`: the test task never unlocks the password protected keystore
+(it only reads the `--dev` one), `run` prompts for the password like deploy does.
+
+```sh
+pnpm hardhat run test/ClaudeLilMessaging.test.ts --network sepolia
+```
 
 ## Circuits
 
@@ -103,3 +123,8 @@ Delete the `$HOME/.aztec/...` line from `~/.bashrc`, then redo
 
 Foundry is a separate install in `~/.foundry/bin`, so `forge`/`cast`/`anvil`
 keep working. `aztec-up` reinstalls Aztec if you ever need it.
+
+# deployments
+
+warptoad: [0xC595711faa9D84D59D7904dbE8890c5b6662156F](https://sepolia.etherscan.io/address/0xC595711faa9D84D59D7904dbE8890c5b6662156F)  
+verifier: [0x42768e1c3825dFF528A44CAC479c9900Dc344a3b](https://sepolia.etherscan.io/address/0x42768e1c3825dFF528A44CAC479c9900Dc344a3b)

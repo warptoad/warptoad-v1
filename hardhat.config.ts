@@ -1,8 +1,14 @@
 import hardhatToolboxViemPlugin from "@nomicfoundation/hardhat-toolbox-viem";
-import { configVariable, defineConfig } from "hardhat/config";
+import { configVariable, defineConfig, task } from "hardhat/config";
 
 export default defineConfig({
   plugins: [hardhatToolboxViemPlugin],
+  tasks: [
+    task("verify-wrapper", "Verify a wrapper token that Warptoad deployed, constructor args are read from chain")
+      .addPositionalArgument({ name: "wrapper", description: "Address of the WarptoadERC20 or WarptoadERC1155" })
+      .setAction(() => import("./scripts/verifyWrapper.js"))
+      .build(),
+  ],
   solidity: {
     profiles: {
       // Warptoad embeds the creation code of both wrapper tokens, which puts it
