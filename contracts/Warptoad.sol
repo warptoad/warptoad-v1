@@ -505,6 +505,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     // --- ERC-20 wrapping ---------------------------------------------------------------
 
     /**
+     * TODO make a helper to wrap and shield in 1 go
      * `_amount` is deposited here and `_to` receives wrapped token as claim on this deposit
      * @notice Creates a new wrapper token contract from a openzeppelin clone factory
      * if it does not exist yet

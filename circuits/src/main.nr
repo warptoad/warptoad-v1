@@ -2,9 +2,7 @@ mod merkle;
 mod hashing;
 mod constants;
 
-use crate::merkle::{
-    leaf_and_index_to_root, LeafAndIndexInclusionProof, LeafInclusionProof,
-};
+use crate::merkle::{leaf_and_index_to_root, LeafAndIndexInclusionProof, LeafInclusionProof};
 
 use crate::hashing::{
     hash_circuit_contract_auth_sig, hash_circuit_contract_storage, hash_commitment,
@@ -221,13 +219,13 @@ pub struct PubInputs<let SIZE: u32> {
 pub struct OwnerInputs {
     pub_key: PubKey,
     nullifier_secret: Field,
-    signature: Signature
+    signature: Signature,
 }
 
-pub struct AuthInputs<let AUTH_HASH_SIZE:u32> {
+pub struct AuthInputs<let AUTH_HASH_SIZE: u32> {
     pub_key: PubKey,
     signature: Signature,
-    inputs: [Field; AUTH_HASH_SIZE]
+    inputs: [Field; AUTH_HASH_SIZE],
 }
 
 /// see hash_public. `messages_hash` is here so a circuit contract can constrain what the sender put in the messages
@@ -264,10 +262,17 @@ fn main(
     pub_in: pub PubInputs<CIRCUIT_SIZE>,
     priv_in: PrivInputs<MAX_TREE_DEPTH, CIRCUIT_SIZE, CIRCUIT_CONTR_AUTH_SIZE>,
 ) {
-    let owner_hash: Field = hash_owner(priv_in.owner.pub_key, pub_in.roots.current_giga_index, priv_in.owner.nullifier_secret);
+    let owner_hash: Field = hash_owner(
+        priv_in.owner.pub_key,
+        pub_in.roots.current_giga_index,
+        priv_in.owner.nullifier_secret,
+    );
     // the contract builds public_hash the same way, see Warptoad.hashPublic. Only the structure is checked for now
     assert(
-        hash_public(priv_in.public_hash_preimage.messages_hash, priv_in.public_hash_preimage.other_hash)
+        hash_public(
+            priv_in.public_hash_preimage.messages_hash,
+            priv_in.public_hash_preimage.other_hash,
+        )
             == pub_in.public_hash,
         "public_hash does not match its preimage",
     );
@@ -293,7 +298,11 @@ fn main(
         pub_in.recipient_commitments_hashes,
     );
     assert(
-        verify_signature(priv_in.owner.pub_key, priv_in.owner.signature, spend_sig_hash),
+        verify_signature(
+            priv_in.owner.pub_key,
+            priv_in.owner.signature,
+            spend_sig_hash,
+        ),
         "invalid spend signature",
     );
 
@@ -316,6 +325,7 @@ fn main(
     //
 
     // first one pick what to spend from
+
     if (priv_in.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
         // TODO nullifier = h(nullifier_secret, giga_index, local_index)
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
