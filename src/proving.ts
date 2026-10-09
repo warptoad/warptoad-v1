@@ -9,18 +9,18 @@ import type { UltraHonkBackend } from "@aztec/bb.js";
 import { Trees } from "@warptoad/skinny-fat-imt-js";
 import { toHex, type Address, type Hex, type PublicClient } from "viem";
 import {
-    CIRCUIT_CONTR_AUTH_SIZE,
-    CIRCUIT_CONTR_STORAGE_EMPTY,
-    CIRCUIT_CONTR_STORAGE_SIZE,
+    CIRCUIT_COMP_AUTH_SIZE,
+    CIRCUIT_COMP_STORAGE_EMPTY,
+    CIRCUIT_COMP_STORAGE_SIZE,
     JOIN_SPLIT_SELECTOR,
     MAX_TREE_DEPTH,
 } from "./constants.js";
 import {
-    hashCircuitContractStorage,
+    hashCircuitComponentStorage,
     hashCommitment,
     hashPreCommitment,
-    type CircuitContrAuthSigInputs,
-    type CircuitContrStorage,
+    type CircuitCompAuthSigInputs,
+    type CircuitCompStorage,
 } from "./hashing.js";
 import type {
     AuthInputs,
@@ -130,11 +130,11 @@ export function emptyProof(): MerkleProofInput {
 }
 
 function selectorOf(n: Note): bigint {
-    return n.circuitContrSelector ?? JOIN_SPLIT_SELECTOR;
+    return n.circuitCompSelector ?? JOIN_SPLIT_SELECTOR;
 }
 
-function storageOf(n: Note): CircuitContrStorage {
-    return n.circuitContrStorage ?? ([...CIRCUIT_CONTR_STORAGE_EMPTY] as CircuitContrStorage);
+function storageOf(n: Note): CircuitCompStorage {
+    return n.circuitCompStorage ?? ([...CIRCUIT_COMP_STORAGE_EMPTY] as CircuitCompStorage);
 }
 
 /** the leaf a note is inserted as */
@@ -143,8 +143,8 @@ export function hashNote(n: Note): bigint {
         preCommitmentHash: hashPreCommitment({
             ownerHash: n.ownerHash,
             sharedNonce: n.sharedNonce,
-            circuitContrSelector: selectorOf(n),
-            circuitContrStorageHash: hashCircuitContractStorage({ circuitContrStorage: storageOf(n) }),
+            circuitCompSelector: selectorOf(n),
+            circuitCompStorageHash: hashCircuitComponentStorage({ circuitCompStorage: storageOf(n) }),
         }),
         assetId: n.assetId,
         amount: n.amount,
@@ -152,15 +152,15 @@ export function hashNote(n: Note): bigint {
 }
 
 /**
- * a recipient slot of the circuit. `circuitContrInput` is what the recipient's circuit contract
+ * a recipient slot of the circuit. `circuitCompInput` is what the recipient's circuit component
  * constructor gets, join_split ignores it. Fakes only need a nonce
  */
-export function recipientInput(n: Note, circuitContrInput: bigint[] = zeros(CIRCUIT_CONTR_STORAGE_SIZE)): CommitmentRecipientDataInput {
+export function recipientInput(n: Note, circuitCompInput: bigint[] = zeros(CIRCUIT_COMP_STORAGE_SIZE)): CommitmentRecipientDataInput {
     return {
         owner_hash: n.ownerHash,
         shared_nonce: n.sharedNonce,
-        circuit_contr_selector: selectorOf(n),
-        circuit_contr_input: circuitContrInput,
+        circuit_comp_selector: selectorOf(n),
+        circuit_comp_input: circuitCompInput,
         asset_id: n.assetId,
         amount: n.amount,
     };
@@ -176,8 +176,8 @@ export function spendInput(
     return {
         commitment: {
             shared_nonce: n.sharedNonce,
-            circuit_contr_selector: selectorOf(n),
-            circuit_contr_storage: [...storageOf(n)],
+            circuit_comp_selector: selectorOf(n),
+            circuit_comp_storage: [...storageOf(n)],
             asset_id: n.assetId,
             amount: n.amount,
         },
@@ -202,7 +202,7 @@ export function noAuth(): AuthInputs {
     return {
         pub_key: { x: 0n, y: 0n },
         signature: { x: 0n, y: 0n, scalar: 0n },
-        inputs: zeros(CIRCUIT_CONTR_AUTH_SIZE) as CircuitContrAuthSigInputs,
+        inputs: zeros(CIRCUIT_COMP_AUTH_SIZE) as CircuitCompAuthSigInputs,
     };
 }
 

@@ -5,13 +5,13 @@ mod constants;
 use crate::merkle::{leaf_and_index_to_root, LeafAndIndexInclusionProof, LeafInclusionProof};
 
 use crate::hashing::{
-    hash_circuit_contract_auth_sig, hash_circuit_contract_storage, hash_commitment,
+    hash_circuit_component_auth_sig, hash_circuit_component_storage, hash_commitment,
     hash_fake_commitment, hash_fake_nullifier, hash_giga_leaf, hash_nullifier, hash_owner,
     hash_pre_commitment, hash_public, hash_spend_signature_inputs,
 };
 
 use crate::constants::{
-    CIRCUIT_CONTR_AUTH_SIZE, CIRCUIT_CONTR_STORAGE_EMPTY_HASH, CIRCUIT_CONTR_STORAGE_SIZE,
+    CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_COMP_STORAGE_SIZE,
     CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH,
 };
 use eddsa::eddsa_verify;
@@ -53,13 +53,13 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     for index in 0..SIZE {
         let spend_commitment: CommitmentSpendProof<MAX_DEPTH> = spend_commitments[index];
         if (index < actual_amount_spend_commitments) {
-            proven_commitments[index].circuit_contr_storage_hash =
-                hash_circuit_contract_storage(spend_commitment.commitment.circuit_contr_storage);
+            proven_commitments[index].circuit_comp_storage_hash =
+                hash_circuit_component_storage(spend_commitment.commitment.circuit_comp_storage);
             let pre_commitment_hash: Field = hash_pre_commitment(
                 owner_hash,
                 spend_commitment.commitment.shared_nonce,
-                spend_commitment.commitment.circuit_contr_selector,
-                proven_commitments[index].circuit_contr_storage_hash,
+                spend_commitment.commitment.circuit_comp_selector,
+                proven_commitments[index].circuit_comp_storage_hash,
             );
             proven_commitments[index].commitment_hash = hash_commitment(
                 pre_commitment_hash,
@@ -76,7 +76,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
 
             // this checks if proof is on same chain, in which case we skip giga_root checks
             if (proven_commitments[index].local_root == local_root) {
-                // circuit contracts will get a 0x00 giga_root
+                // circuit components will get a 0x00 giga_root
                 // proven_commitment.giga_root = 0x00;
                 // no lying about the giga_index or local_edge_index used!
                 proven_commitments[index].giga_leaf_index = current_giga_index;
@@ -97,10 +97,10 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             }
             proven_commitments[index].amount = spend_commitment.commitment.amount;
             proven_commitments[index].asset_id = spend_commitment.commitment.asset_id;
-            proven_commitments[index].circuit_contr_selector =
-                spend_commitment.commitment.circuit_contr_selector;
-            proven_commitments[index].circuit_contr_storage =
-                spend_commitment.commitment.circuit_contr_storage;
+            proven_commitments[index].circuit_comp_selector =
+                spend_commitment.commitment.circuit_comp_selector;
+            proven_commitments[index].circuit_comp_storage =
+                spend_commitment.commitment.circuit_comp_storage;
             proven_commitments[index].local_leaf_index = spend_commitment.local_proof.index;
         } else {
             // it's a fake commitment so we make a fake_commitment hash
@@ -135,8 +135,8 @@ fn greater_or_equal(a: Field, b: Field) -> bool {
 
 struct CommitmentProofData {
     shared_nonce: Field,
-    circuit_contr_selector: Field,
-    circuit_contr_storage: [Field; CIRCUIT_CONTR_STORAGE_SIZE],
+    circuit_comp_selector: Field,
+    circuit_comp_storage: [Field; CIRCUIT_COMP_STORAGE_SIZE],
     asset_id: Field,
     amount: Field,
 }
@@ -144,8 +144,8 @@ struct CommitmentProofData {
 struct CommitmentRecipientData {
     owner_hash: Field,
     shared_nonce: Field,
-    circuit_contr_selector: Field,
-    circuit_contr_input: [Field; CIRCUIT_CONTR_STORAGE_SIZE],
+    circuit_comp_selector: Field,
+    circuit_comp_input: [Field; CIRCUIT_COMP_STORAGE_SIZE],
     asset_id: Field,
     amount: Field,
 }
@@ -153,9 +153,9 @@ struct CommitmentRecipientData {
 pub struct ProvenCommitment {
     local_root: Field,
     giga_root: Field,
-    circuit_contr_selector: Field,
-    circuit_contr_storage: [Field; CIRCUIT_CONTR_STORAGE_SIZE],
-    circuit_contr_storage_hash: Field,
+    circuit_comp_selector: Field,
+    circuit_comp_storage: [Field; CIRCUIT_COMP_STORAGE_SIZE],
+    circuit_comp_storage_hash: Field,
     asset_id: Field,
     amount: Field,
     commitment_hash: Field,
@@ -228,7 +228,7 @@ pub struct AuthInputs<let AUTH_HASH_SIZE: u32> {
     inputs: [Field; AUTH_HASH_SIZE],
 }
 
-/// see hash_public. `messages_hash` is here so a circuit contract can constrain what the sender put in the messages
+/// see hash_public. `messages_hash` is here so a circuit component can constrain what the sender put in the messages
 pub struct PublicHashPreimage {
     messages_hash: Field,
     other_hash: Field,
@@ -249,18 +249,18 @@ pub struct PrivInputs<let DEPTH: u32, let SIZE: u32, let AUTH_HASH_SIZE: u32> {
     owner: OwnerInputs,
     auth: AuthInputs<AUTH_HASH_SIZE>,
     // for now just one selector instead of contract_selector + function_selector
-    // this selector is to validate the spend logic, join_split will call any circuit_contract with given inputs
+    // this selector is to validate the spend logic, join_split will call any circuit_component with given inputs
     // based on selectors and inputs in recipient_commitments
-    // you can only spend from one circuit_contract at the time, this is to make joins easier to implement
+    // you can only spend from one circuit_component at the time, this is to make joins easier to implement
     // since it's very chill to work with all the same spend_commitments, so you can just add up amounts
-    circuit_contr_selector: Field,
+    circuit_comp_selector: Field,
 }
 
 // TODO remember to pad timestamps a bit, by just waiting a extra random amount of time. So not to finger print txs proof time
 // TODO remember to domain separate fake nullifiers and commitments,
 fn main(
     pub_in: pub PubInputs<CIRCUIT_SIZE>,
-    priv_in: PrivInputs<MAX_TREE_DEPTH, CIRCUIT_SIZE, CIRCUIT_CONTR_AUTH_SIZE>,
+    priv_in: PrivInputs<MAX_TREE_DEPTH, CIRCUIT_SIZE, CIRCUIT_COMP_AUTH_SIZE>,
 ) {
     let owner_hash: Field = hash_owner(
         priv_in.owner.pub_key,
@@ -277,7 +277,7 @@ fn main(
         "public_hash does not match its preimage",
     );
     // @warning: THESE COMMITMENTS ARE NOT VERIFIED, only that commitment+proof = root, but THAT ROOT CAN BE INVALID
-    // the `circuit_contract` functions below should check if those roots are valid!
+    // the `circuit_component` functions below should check if those roots are valid!
     let spend_commitments_and_roots: [ProvenCommitment; CIRCUIT_SIZE] =
         // local_root is passed here, ONLY TO SKIP giga_root proof checks. IT IS NOT VERIFIED
         proof_root_of_commitments(
@@ -307,7 +307,7 @@ fn main(
     );
 
     if (priv_in.auth.inputs != std::mem::zeroed()) {
-        let auth_sig_hash: Field = hash_circuit_contract_auth_sig(priv_in.auth.inputs);
+        let auth_sig_hash: Field = hash_circuit_component_auth_sig(priv_in.auth.inputs);
         assert(
             verify_signature(priv_in.auth.pub_key, priv_in.auth.signature, auth_sig_hash),
             "invalid auth signature",
@@ -319,19 +319,19 @@ fn main(
     //      -signer, in `signer_owner_secrets` is allowed to nullify and spend these commitment
     //          ex in join_split, because they are in that commitments
     //          or in closing a swap, it is proven that counter party has access to the other locked funds
-    //      -commitment being spend contains the expected: `circuit_contract` domain separator
+    //      -commitment being spend contains the expected: `circuit_component` domain separator
     //
     // Fuck any of that up and you quickly have INFINITE MINT BUGS or stolen funds
     //
 
     // first one pick what to spend from
 
-    if (priv_in.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
+    if (priv_in.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
         // TODO nullifier = h(nullifier_secret, giga_index, local_index)
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
         // just add a nullifier slot number
         join_split(
-            CircuitContrInputs {
+            CircuitCompInputs {
                 local_root: pub_in.roots.local_root,
                 giga_root: pub_in.roots.giga_root,
                 proof_expire_time_stamp: pub_in.time_stamps.proof_expire_time_stamp,
@@ -350,10 +350,10 @@ fn main(
             },
         )
     } else {
-        assert(false, "unknown signed_data.circuit_contract_selector");
+        assert(false, "unknown signed_data.circuit_component_selector");
     }
 
-    // @WARNING every circuit contract should either block unshield by doing assert(unshielding_commitment.asset_id == 0x00)
+    // @WARNING every circuit component should either block unshield by doing assert(unshielding_commitment.asset_id == 0x00)
     // or correctly check accounting on these unshielding_commitments
     for index in 0..CIRCUIT_SIZE {
         let unshielding_commitment: UnshieldingCommitment = pub_in.unshielding_commitments[index];
@@ -389,7 +389,7 @@ fn main(
     }
 }
 
-pub struct CircuitContrInputs<let SIZE: u32> {
+pub struct CircuitCompInputs<let SIZE: u32> {
     local_root: Field,
     giga_root: Field,
     proof_expire_time_stamp: Field,
@@ -403,17 +403,17 @@ pub struct CircuitContrInputs<let SIZE: u32> {
     spend_commitments_and_roots: [ProvenCommitment; SIZE],
     actual_amount_spend_commitments: u32,
     nullifier_secret: Field,
-    auth_sig_inputs: [Field; CIRCUIT_CONTR_AUTH_SIZE],
+    auth_sig_inputs: [Field; CIRCUIT_COMP_AUTH_SIZE],
     owner_hash: Field,
 }
 
 // this guy has no inputs!
-fn hash_join_split_inputs<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) -> Field {
-    CIRCUIT_CONTR_STORAGE_EMPTY_HASH
+fn hash_join_split_inputs<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> Field {
+    CIRCUIT_COMP_STORAGE_EMPTY_HASH
 }
 
 // TODO dummy nullifiers and commitment_hashes
-fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
+fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
     // only one asset at the time pls
     let expected_asset_id: Field = inputs.spend_commitments_and_roots[0].asset_id;
     let mut spendable: Field = 0;
@@ -437,8 +437,8 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
             }
             // other checks
             assert(
-                spend_commitment.circuit_contr_selector == JOIN_SPLIT_SELECTOR,
-                "The first commitment in spend_commitments was set to JOIN_SPLIT, but another was found set to a different circuit contract. Please only spend from one circuit contract at a time.",
+                spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
+                "The first commitment in spend_commitments was set to JOIN_SPLIT, but another was found set to a different circuit component. Please only spend from one circuit component at a time.",
             );
             assert(
                 expected_asset_id == spend_commitment.asset_id,
@@ -462,13 +462,13 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
         let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
         let mut recipient_commitment_hash: Field = 0x00;
         if (index < inputs.actual_amount_recipient_commitments) {
-            let mut recipient_storage_hash: Field = CIRCUIT_CONTR_STORAGE_EMPTY_HASH;
-            if (recipient_commitment.circuit_contr_selector == JOIN_SPLIT_SELECTOR) {
+            let mut recipient_storage_hash: Field = CIRCUIT_COMP_STORAGE_EMPTY_HASH;
+            if (recipient_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
                 recipient_storage_hash = hash_join_split_inputs(inputs)
             } else {
                 assert(
                     false,
-                    "unknown circuit_contr_selector in recipient_commitments when trying to call a circuit contract",
+                    "unknown circuit_comp_selector in recipient_commitments when trying to call a circuit component",
                 );
             };
             assert(
@@ -481,15 +481,15 @@ fn join_split<let SIZE: u32>(inputs: CircuitContrInputs<SIZE>) {
             // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
             assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
 
-            // TODO hoist this out of here so other circuit contracts don't do double works hashing like this
+            // TODO hoist this out of here so other circuit components don't do double works hashing like this
             // and check here:
             // recipient_commitment_hash == inputs.recipient_commitments_hashes[index]
             // expected_asset_id == recipient_commitment.asset_id
-            // recipient_storage_hash == recipient_commitment.circuit_contr_storage_hash
+            // recipient_storage_hash == recipient_commitment.circuit_comp_storage_hash
             let pre_commitment_hash: Field = hash_pre_commitment(
                 recipient_commitment.owner_hash,
                 recipient_commitment.shared_nonce,
-                recipient_commitment.circuit_contr_selector,
+                recipient_commitment.circuit_comp_selector,
                 recipient_storage_hash,
             );
             recipient_commitment_hash = hash_commitment(

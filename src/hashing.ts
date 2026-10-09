@@ -22,10 +22,10 @@ export const GIGA_LEAF_DOMAIN =
 
 export type PubKey = { x: bigint; y: bigint };
 
-/** `[Field; CIRCUIT_CONTR_STORAGE_SIZE]` */
-export type CircuitContrStorage = [bigint, bigint, bigint];
-/** `[Field; CIRCUIT_CONTR_AUTH_SIZE]` */
-export type CircuitContrAuthSigInputs = [bigint, bigint, bigint, bigint, bigint, bigint];
+/** `[Field; CIRCUIT_COMP_STORAGE_SIZE]` */
+export type CircuitCompStorage = [bigint, bigint, bigint];
+/** `[Field; CIRCUIT_COMP_AUTH_SIZE]` */
+export type CircuitCompAuthSigInputs = [bigint, bigint, bigint, bigint, bigint, bigint];
 /** `[Field; CIRCUIT_SIZE]` */
 export type CircuitSizeFields = [bigint, bigint, bigint, bigint];
 
@@ -53,37 +53,37 @@ export function hashCommitment({
     return poseidon2Hash([preCommitmentHash, assetId, amount]);
 }
 
-/** `hash_circuit_contract_storage`: Poseidon2(circuit_contr_storage) over CIRCUIT_CONTR_STORAGE_SIZE fields */
-export function hashCircuitContractStorage({
-    circuitContrStorage,
+/** `hash_circuit_component_storage`: Poseidon2(circuit_comp_storage) over CIRCUIT_COMP_STORAGE_SIZE fields */
+export function hashCircuitComponentStorage({
+    circuitCompStorage,
 }: {
-    circuitContrStorage: CircuitContrStorage;
+    circuitCompStorage: CircuitCompStorage;
 }): bigint {
-    return poseidon2Hash(circuitContrStorage);
+    return poseidon2Hash(circuitCompStorage);
 }
 
-/** `hash_circuit_contract_auth_sig`: Poseidon2(auth_sig_inputs) over CIRCUIT_CONTR_AUTH_SIZE fields */
-export function hashCircuitContractAuthSig({
+/** `hash_circuit_component_auth_sig`: Poseidon2(auth_sig_inputs) over CIRCUIT_COMP_AUTH_SIZE fields */
+export function hashCircuitComponentAuthSig({
     authSigInputs,
 }: {
-    authSigInputs: CircuitContrAuthSigInputs;
+    authSigInputs: CircuitCompAuthSigInputs;
 }): bigint {
     return poseidon2Hash(authSigInputs);
 }
 
-/** `hash_pre_commitment`: Poseidon2([owner_hash, shared_nonce, circuit_contr_selector, circuit_contr_storage_hash]) */
+/** `hash_pre_commitment`: Poseidon2([owner_hash, shared_nonce, circuit_comp_selector, circuit_comp_storage_hash]) */
 export function hashPreCommitment({
     ownerHash,
     sharedNonce,
-    circuitContrSelector,
-    circuitContrStorageHash,
+    circuitCompSelector,
+    circuitCompStorageHash,
 }: {
     ownerHash: bigint;
     sharedNonce: bigint;
-    circuitContrSelector: bigint;
-    circuitContrStorageHash: bigint;
+    circuitCompSelector: bigint;
+    circuitCompStorageHash: bigint;
 }): bigint {
-    return poseidon2Hash([ownerHash, sharedNonce, circuitContrSelector, circuitContrStorageHash]);
+    return poseidon2Hash([ownerHash, sharedNonce, circuitCompSelector, circuitCompStorageHash]);
 }
 
 /** `hash_owner`: Poseidon2([spend_pub_key.x, spend_pub_key.y, dest_giga_index, nullifier_secret]) */

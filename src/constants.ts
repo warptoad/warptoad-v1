@@ -5,13 +5,13 @@ import { poseidon2Hash } from "@zkpassport/poseidon2";
 
 // asset_id, amount, expiry, ref_to_lock: 4 inputs needed, poseidon2 cost is the
 // same up to 6, so 6.
-export const CIRCUIT_CONTR_AUTH_SIZE = 6;
-export const CIRCUIT_CONTR_STORAGE_SIZE = 3;
-export const CIRCUIT_CONTR_STORAGE_EMPTY: readonly bigint[] = Object.freeze(
-    new Array<bigint>(CIRCUIT_CONTR_STORAGE_SIZE).fill(0n),
+export const CIRCUIT_COMP_AUTH_SIZE = 6;
+export const CIRCUIT_COMP_STORAGE_SIZE = 3;
+export const CIRCUIT_COMP_STORAGE_EMPTY: readonly bigint[] = Object.freeze(
+    new Array<bigint>(CIRCUIT_COMP_STORAGE_SIZE).fill(0n),
 );
-export const CIRCUIT_CONTR_STORAGE_EMPTY_HASH: bigint = poseidon2Hash([
-    ...CIRCUIT_CONTR_STORAGE_EMPTY,
+export const CIRCUIT_COMP_STORAGE_EMPTY_HASH: bigint = poseidon2Hash([
+    ...CIRCUIT_COMP_STORAGE_EMPTY,
 ]);
 export const CIRCUIT_SIZE = 4;
 // to match aztec note_hash_tree, also we need to put edge index at 2**40 - 1 there

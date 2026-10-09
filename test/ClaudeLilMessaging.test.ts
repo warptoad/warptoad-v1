@@ -26,7 +26,7 @@ import { network } from "hardhat";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 import type { Note, WarptoadContract } from "../src/types.js";
 import { chainName, NAME_PREFIX, SYMBOL_PREFIX } from "../src/config.js";
-import { CIRCUIT_CONTR_STORAGE_EMPTY_HASH, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
+import { CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
 import {
     hashFakeCommitment,
     hashFakeNullifier,
@@ -202,8 +202,8 @@ describe("ClaudeLilMessaging", async function () {
         const preCommitmentHash = hashPreCommitment({
             ownerHash: alice.ownerHash,
             sharedNonce: aliceDeposit.sharedNonce,
-            circuitContrSelector: JOIN_SPLIT_SELECTOR,
-            circuitContrStorageHash: CIRCUIT_CONTR_STORAGE_EMPTY_HASH,
+            circuitCompSelector: JOIN_SPLIT_SELECTOR,
+            circuitCompStorageHash: CIRCUIT_COMP_STORAGE_EMPTY_HASH,
         });
         const message = await encryptNote(aliceDeposit, alice.view.publicKey);
         await send(warptoad.write.shieldErc20([wrapper.address, 400n, preCommitmentHash, message], { account: aliceWallet.account }));
@@ -280,7 +280,7 @@ describe("ClaudeLilMessaging", async function () {
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: noAuth(),
-                circuit_contr_selector: JOIN_SPLIT_SELECTOR,
+                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
             },
         });
 
@@ -387,7 +387,7 @@ describe("ClaudeLilMessaging", async function () {
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: noAuth(),
-                circuit_contr_selector: JOIN_SPLIT_SELECTOR,
+                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
             },
         });
 
@@ -424,6 +424,6 @@ describe("ClaudeLilMessaging", async function () {
 
     /** decryptNote always fills in the optional Note fields */
     function recipientDefaults() {
-        return { circuitContrSelector: JOIN_SPLIT_SELECTOR, circuitContrStorage: [0n, 0n, 0n] };
+        return { circuitCompSelector: JOIN_SPLIT_SELECTOR, circuitCompStorage: [0n, 0n, 0n] };
     }
 });

@@ -28,8 +28,8 @@ import {
     type Hex,
     type PublicClient,
 } from "viem";
-import { CIRCUIT_CONTR_STORAGE_EMPTY, JOIN_SPLIT_SELECTOR } from "./constants.js";
-import { hashPublic, keccak31Byte, type CircuitContrStorage } from "./hashing.js";
+import { CIRCUIT_COMP_STORAGE_EMPTY, JOIN_SPLIT_SELECTOR } from "./constants.js";
+import { hashPublic, keccak31Byte, type CircuitCompStorage } from "./hashing.js";
 import { fakeNote, hashNote } from "./proving.js";
 import type { Note, PublicHashPreimageInput, WarptoadContract } from "./types.js";
 
@@ -76,8 +76,8 @@ const PLAINTEXT_SIZE = noteToJson({
     sharedNonce: MAX_FIELD,
     assetId: MAX_FIELD,
     amount: MAX_FIELD,
-    circuitContrSelector: MAX_FIELD,
-    circuitContrStorage: [MAX_FIELD, MAX_FIELD, MAX_FIELD],
+    circuitCompSelector: MAX_FIELD,
+    circuitCompStorage: [MAX_FIELD, MAX_FIELD, MAX_FIELD],
 }).length;
 
 /** one view key per wallet, from any secret. sha256 mod n has negligible bias since n is within 2^-128 of 2^256 */
@@ -174,8 +174,8 @@ function noteToJson(n: Note): string {
     return JSON.stringify({
         ownerHash: toHex(n.ownerHash),
         sharedNonce: toHex(n.sharedNonce),
-        circuitContrSelector: toHex(n.circuitContrSelector ?? JOIN_SPLIT_SELECTOR),
-        circuitContrStorage: (n.circuitContrStorage ?? CIRCUIT_CONTR_STORAGE_EMPTY).map(function (x) {
+        circuitCompSelector: toHex(n.circuitCompSelector ?? JOIN_SPLIT_SELECTOR),
+        circuitCompStorage: (n.circuitCompStorage ?? CIRCUIT_COMP_STORAGE_EMPTY).map(function (x) {
             return toHex(x);
         }),
         assetId: toHex(n.assetId),
@@ -184,12 +184,12 @@ function noteToJson(n: Note): string {
 }
 
 function jsonToNote(json: string): Note {
-    const j = JSON.parse(json) as Record<string, string> & { circuitContrStorage: string[] };
+    const j = JSON.parse(json) as Record<string, string> & { circuitCompStorage: string[] };
     return {
         ownerHash: BigInt(j.ownerHash),
         sharedNonce: BigInt(j.sharedNonce),
-        circuitContrSelector: BigInt(j.circuitContrSelector),
-        circuitContrStorage: j.circuitContrStorage.map(BigInt) as CircuitContrStorage,
+        circuitCompSelector: BigInt(j.circuitCompSelector),
+        circuitCompStorage: j.circuitCompStorage.map(BigInt) as CircuitCompStorage,
         assetId: BigInt(j.assetId),
         amount: BigInt(j.amount),
     };

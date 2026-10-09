@@ -267,7 +267,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
     //--------- shielding -----------
     /**
-     * TODO: circuit contracts can be called here and just anything can be put into their storage
+     * TODO: circuit components can be called here and just anything can be put into their storage
      * // since no zk is checking that here. Can't constrain it to only be join_split here for example
      * // since then we reveal owner_hash.
      * // single chain and cross chain swap should not have a issue with this tho

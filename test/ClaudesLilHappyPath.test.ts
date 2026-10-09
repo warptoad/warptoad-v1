@@ -18,7 +18,7 @@ import { network } from "hardhat";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 import type { Note, WarptoadContract } from "../src/types.js";
 import { chainName, NAME_PREFIX, SYMBOL_PREFIX } from "../src/config.js";
-import { CIRCUIT_CONTR_STORAGE_EMPTY_HASH, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
+import { CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
 import {
     hashFakeCommitment,
     hashFakeNullifier,
@@ -155,8 +155,8 @@ describe("ClaudesLilHappyPath", async function () {
         const preCommitmentHash = hashPreCommitment({
             ownerHash: alice.ownerHash,
             sharedNonce: aliceDeposit.sharedNonce,
-            circuitContrSelector: JOIN_SPLIT_SELECTOR,
-            circuitContrStorageHash: CIRCUIT_CONTR_STORAGE_EMPTY_HASH,
+            circuitCompSelector: JOIN_SPLIT_SELECTOR,
+            circuitCompStorageHash: CIRCUIT_COMP_STORAGE_EMPTY_HASH,
         });
         await warptoad.write.shieldErc20([wrapper.address, 400n, preCommitmentHash, "0x"], { account: aliceWallet.account });
 
@@ -221,7 +221,7 @@ describe("ClaudesLilHappyPath", async function () {
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: noAuth(),
-                circuit_contr_selector: JOIN_SPLIT_SELECTOR,
+                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
             },
         });
 
@@ -314,7 +314,7 @@ describe("ClaudesLilHappyPath", async function () {
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: noAuth(),
-                circuit_contr_selector: JOIN_SPLIT_SELECTOR,
+                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
             },
         });
 

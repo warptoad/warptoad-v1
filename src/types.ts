@@ -1,6 +1,6 @@
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 import type { WARPTOAD_CONTRACT_NAME } from "./config.js";
-import type { CircuitContrAuthSigInputs, CircuitContrStorage, CircuitSizeFields, PubKey } from "./hashing.js";
+import type { CircuitCompAuthSigInputs, CircuitCompStorage, CircuitSizeFields, PubKey } from "./hashing.js";
 
 export type WarptoadContract = ContractReturnType<typeof WARPTOAD_CONTRACT_NAME>;
 
@@ -13,9 +13,9 @@ export type Note = {
     assetId: bigint;
     amount: bigint;
     /** defaults to JOIN_SPLIT_SELECTOR */
-    circuitContrSelector?: bigint;
-    /** defaults to CIRCUIT_CONTR_STORAGE_EMPTY */
-    circuitContrStorage?: CircuitContrStorage;
+    circuitCompSelector?: bigint;
+    /** defaults to CIRCUIT_COMP_STORAGE_EMPTY */
+    circuitCompStorage?: CircuitCompStorage;
 };
 
 // ------ mirrors of the structs in circuits/src/main.nr ------
@@ -28,8 +28,8 @@ export type SignatureInput = { x: bigint; y: bigint; scalar: bigint };
 
 export type CommitmentProofDataInput = {
     shared_nonce: bigint;
-    circuit_contr_selector: bigint;
-    circuit_contr_storage: bigint[];
+    circuit_comp_selector: bigint;
+    circuit_comp_storage: bigint[];
     asset_id: bigint;
     amount: bigint;
 };
@@ -44,8 +44,8 @@ export type CommitmentSpendProofInput = {
 export type CommitmentRecipientDataInput = {
     owner_hash: bigint;
     shared_nonce: bigint;
-    circuit_contr_selector: bigint;
-    circuit_contr_input: bigint[];
+    circuit_comp_selector: bigint;
+    circuit_comp_input: bigint[];
     asset_id: bigint;
     amount: bigint;
 };
@@ -75,7 +75,7 @@ export type PubInputs = {
 
 export type OwnerInputs = { pub_key: PubKey; nullifier_secret: bigint; signature: SignatureInput };
 
-export type AuthInputs = { pub_key: PubKey; signature: SignatureInput; inputs: CircuitContrAuthSigInputs };
+export type AuthInputs = { pub_key: PubKey; signature: SignatureInput; inputs: CircuitCompAuthSigInputs };
 
 /** `PublicHashPreimage`: Poseidon2 of these two is `public_hash`, see `publicHashOf` in messages.ts */
 export type PublicHashPreimageInput = { messages_hash: bigint; other_hash: bigint };
@@ -90,7 +90,7 @@ export type PrivInputs = {
     actual_amount_spend_commitments: number;
     owner: OwnerInputs;
     auth: AuthInputs;
-    circuit_contr_selector: bigint;
+    circuit_comp_selector: bigint;
 };
 
 /** the two arguments of `main` */

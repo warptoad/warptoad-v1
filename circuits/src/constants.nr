@@ -3,11 +3,11 @@ use poseidon::poseidon2::Poseidon2;
 // asset_id, amount, expiry, ref_to_lock.
 // so set to 7 since poseidon2 cost scale per order 4 with the first being 3 for size domain separation
 // tldr we need 4 inputs, might as well support 6 since no added cost
-pub global CIRCUIT_CONTR_AUTH_SIZE: u32 = 6;
-pub global CIRCUIT_CONTR_STORAGE_SIZE: u32 = 3;
-pub global CIRCUIT_CONTR_STORAGE_EMPTY: [Field; CIRCUIT_CONTR_STORAGE_SIZE] = std::mem::zeroed();
-pub global CIRCUIT_CONTR_STORAGE_EMPTY_HASH: Field =
-    Poseidon2::hash(CIRCUIT_CONTR_STORAGE_EMPTY, CIRCUIT_CONTR_STORAGE_SIZE);
+pub global CIRCUIT_COMP_AUTH_SIZE: u32 = 6;
+pub global CIRCUIT_COMP_STORAGE_SIZE: u32 = 3;
+pub global CIRCUIT_COMP_STORAGE_EMPTY: [Field; CIRCUIT_COMP_STORAGE_SIZE] = std::mem::zeroed();
+pub global CIRCUIT_COMP_STORAGE_EMPTY_HASH: Field =
+    Poseidon2::hash(CIRCUIT_COMP_STORAGE_EMPTY, CIRCUIT_COMP_STORAGE_SIZE);
 pub global CIRCUIT_SIZE: u32 = 4;
 // to match aztec note_hash_tree, also we need to put edge index at 2**40 - 1 there
 // no tree resets: at ~12M leaves/day 2^40 lasts ~250 years, quantum breaks bn254 first
