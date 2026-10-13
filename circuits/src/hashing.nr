@@ -3,7 +3,7 @@ use crate::constants::{
     FAKE_NULLIFIER_DOMAIN,
 };
 use crate::{ProvenCommitment, PubKey};
-use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
+use poseidon::poseidon2::{Poseidon2};
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
 
 /**                                                            # sender needs to share everything in commitment + preCommitmentHash, so: [shared_nonce, CIRCUIT_COMPONENT, asset_id, amount]. maybe also share inputs of asset_id idk. We could store that one time onchain so the encrypted blob wont be huge. owner knows owner_hash inputs, he is literally him
@@ -19,9 +19,9 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  * without knowing                |             /      |     \
  * their chain or pubKey       pre_commitment_hash    asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
  *         \                  /   |      \       \        \       
- *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(wrapperAddr,assetAddr,0,originGigaIndex,"ERC20"),erc721=keccak(contractAddr,nftId,originGigaIndex,"ERC721"),erc1155=keccak(contractAddr,nftId,originGigaIndex,"ERC1155")
- *        / |       |        \   nonce   CONTRACT  \
- *       / /        |         \      |               circuit_component_storage_hash
+ *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(wrapperAddr,wrapperArgHash)
+ *        / |       |        \   nonce   CONTRACT  \                                          |
+ *       / /        |         \      |               circuit_component_storage_hash           ex: keccack(contractAddr,_id/_id/0, originGigaIndex, "ERC1155"/"ERC721"/"ERC20")
  *  spending  dest_giga_index  \   to blind commit                            |
  *   PubKey                     \                                         # ex in join_split: pre_nullifier
  *   X and y                   nullifier_secret                           # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
