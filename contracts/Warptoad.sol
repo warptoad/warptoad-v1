@@ -58,12 +58,6 @@ struct UnshieldingCommitment {
     uint256 assetId;
 }
 
-/// @dev tells the contract which wrapper an unshielding slot's `assetId` is, it can't invert the hash itself
-struct UnshieldTarget {
-    address wrapper;
-    uint256 id; // 0 for ERC20
-}
-
 /// @dev everything `verifyShieldedTx` needs. All arrays are CIRCUIT_SIZE long
 struct ShieldedTx {
     PubRootsAndIndexes roots;
@@ -281,15 +275,10 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * @param _preCommitmentHash: who will receive the shielded tokens, as a blinded hash
      * @param _message: encrypted note for the recipient, see src/messages.ts
      */
-    function shieldErc20(address _wrapper, uint256 _amount, uint256 _preCommitmentHash, bytes calldata _message)
+    function shield(address _wrapperFactory, uint256 _wrapperHash, uint256 _preCommitmentHash, uint256 _amount, bytes calldata _message)
         public
     {
-        address token = underlyingOf[_wrapper].token;
-        if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
-        // burn it, it is now shielded and can be unshielded on this or another chain, where a new wrapper token is minted :D
-        WarptoadERC20(_wrapper).burn(msg.sender, _amount);
-        uint256 _assetId = hashAssetId(token, 0, gigaIndex, AssetType.ERC20);
-        // @notice, zemse poseidon implementation can only handle up to 3 inputs, transferDataHash is just to get around that
+        uint256 _assetId = keccak31Byte(abi.encode(_wrapperFactory,_wrapperHash));
         uint256 _commitment = Poseidon2.hash_3(_preCommitmentHash, _assetId, _amount);
         (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
         localRoots[newRoot] = index + 1;
@@ -297,37 +286,37 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         emit Message(_commitment, _message);
     }
 
-    /**
-     * @param _wrapper: which wrapped collection to shield from
-     * @param _id: which token id
-     * @param _amount: how much of that id to shield
-     * @param _preCommitmentHash: who will receive the shielded tokens, as a blinded hash
-     * @param _message: encrypted note for the recipient, see src/messages.ts
-     */
-    function shieldErc1155(
-        address _wrapper,
-        uint256 _id,
-        uint256 _amount,
-        uint256 _preCommitmentHash,
-        bytes calldata _message
-    ) public {
-        address collection = underlyingOf[_wrapper].token;
-        if (collection == address(0) || erc1155WrapperOf[collection] != _wrapper) revert NotAWrapper(_wrapper);
-        WarptoadERC1155(_wrapper).burn(msg.sender, _id, _amount);
-        uint256 _assetId = hashAssetId(collection, _id, gigaIndex, AssetType.ERC1155);
-        uint256 _commitment = Poseidon2.hash_3(_preCommitmentHash, _assetId, _amount);
-        (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
-        localRoots[newRoot] = index + 1;
-        emit Shielded(_wrapper, _assetId, _amount, _commitment);
-        emit Message(_commitment, _message);
-    }
+    // /**
+    //  * @param _wrapper: which wrapped collection to shield from
+    //  * @param _id: which token id
+    //  * @param _amount: how much of that id to shield
+    //  * @param _preCommitmentHash: who will receive the shielded tokens, as a blinded hash
+    //  * @param _message: encrypted note for the recipient, see src/messages.ts
+    //  */
+    // function shieldErc1155(
+    //     address _wrapper,
+    //     uint256 _id,
+    //     uint256 _amount,
+    //     uint256 _preCommitmentHash,
+    //     bytes calldata _message
+    // ) public {
+    //     address collection = underlyingOf[_wrapper].token;
+    //     if (collection == address(0) || erc1155WrapperOf[collection] != _wrapper) revert NotAWrapper(_wrapper);
+    //     WarptoadERC1155(_wrapper).burn(msg.sender, _id, _amount);
+    //     uint256 _assetId = hashAssetId(collection, _id, gigaIndex, AssetType.ERC1155);
+    //     uint256 _commitment = Poseidon2.hash_3(_preCommitmentHash, _assetId, _amount);
+    //     (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage.insert(commitmentTree, _commitment);
+    //     localRoots[newRoot] = index + 1;
+    //     emit Shielded(_wrapper, _assetId, _amount, _commitment);
+    //     emit Message(_commitment, _message);
+    // }
 
     /**
      * @notice spends shielded commitments into new shielded commitments and/or unshields them into wrapper tokens.
      * A normal shielded transfer is just this with all `unshieldingCommitments[i].assetId == 0`.
      * @param _tx: see `ShieldedTx`
      */
-    function verifyShieldedTx(ShieldedTx calldata _tx) external nonReentrant {
+    function transactPrivate(ShieldedTx calldata _tx) external nonReentrant {
         _spendNullifiers(_tx.nullifiers);
         _checkRootsAndTimeStamps(_tx.roots, _tx.timeStamps);
         if (_tx.messages.length != CIRCUIT_SIZE) revert WrongCircuitSize(CIRCUIT_SIZE, _tx.messages.length);
@@ -417,29 +406,13 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * which is only an eth address because this is an unshield. Here we only need to find out which wrapper
      * `assetId` is and mint it
      */
-    function _unshield(UnshieldingCommitment calldata _commitment, UnshieldTarget calldata _target) private {
+    function _unshield(UnshieldingCommitment calldata _commitment, address _wrapperFactory, uint256 _wrapperHash, uint256 _wrapperArgs ) private {
         if (_commitment.recipient >> 160 != 0) revert RecipientNotAnAddress(_commitment.recipient);
-        address recipient = address(uint160(_commitment.recipient));
-        address wrapper = _target.wrapper;
+        uint256 expectedAssetId = keccak31Byte(abi.encode(_wrapperFactory, _wrapperHash));
+        require(expectedAssetId == _commitment.assetId, "assetId from commitment does not match assetId from wrapperFactory");
 
-        Underlying memory underlying = underlyingOf[wrapper];
-        if (underlying.token == address(0)) revert NotAWrapper(wrapper);
-        uint256 expectedAssetId;
-        if (erc20WrapperOf[underlying.token] == wrapper) {
-            expectedAssetId = hashAssetId(underlying.token, 0, underlying.chainWarpDomain, AssetType.ERC20);
-            if (expectedAssetId != _commitment.assetId) {
-                revert WrongAssetId(wrapper, expectedAssetId, _commitment.assetId);
-            }
-            WarptoadERC20(wrapper).mint(recipient, _commitment.amount);
-        } else if (erc1155WrapperOf[underlying.token] == wrapper) {
-            expectedAssetId = hashAssetId(underlying.token, _target.id, underlying.chainWarpDomain, AssetType.ERC1155);
-            if (expectedAssetId != _commitment.assetId) {
-                revert WrongAssetId(wrapper, expectedAssetId, _commitment.assetId);
-            }
-            WarptoadERC1155(wrapper).mint(recipient, _target.id, _commitment.amount);
-        } else {
-            revert NotAWrapper(wrapper);
-        }
+        // if call fails do:
+        //revert NotAWrapper(wrapper);
         emit Unshielded(wrapper, recipient, _commitment.assetId, _commitment.amount);
     }
 
@@ -492,88 +465,88 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     //----------------------------
 
     // Takes a symbol like USDC -> wtUSDC@eth for example on L1
-    // Maybe wt:USDC@eth, wt:USDC:eth
-    function _getTokenSymbol(string memory _baseTokenSymbol) private view returns (string memory) {
-        return string.concat(symbolPreFix, _baseTokenSymbol, "@", chainSymbol);
-    }
+    // // Maybe wt:USDC@eth, wt:USDC:eth
+    // function _getTokenSymbol(string memory _baseTokenSymbol) private view returns (string memory) {
+    //     return string.concat(symbolPreFix, _baseTokenSymbol, "@", chainSymbol);
+    // }
 
-    // Takes a name like "USD Coin " -> "Wrapped Warptoad USD Coin Ethereum"  for example on L1
-    function _getTokenName(string memory _baseTokenName) private view returns (string memory) {
-        return string.concat("Wrapped ", namePreFix, " ", _baseTokenName, " ", chainName);
-    }
+    // // Takes a name like "USD Coin " -> "Wrapped Warptoad USD Coin Ethereum"  for example on L1
+    // function _getTokenName(string memory _baseTokenName) private view returns (string memory) {
+    //     return string.concat("Wrapped ", namePreFix, " ", _baseTokenName, " ", chainName);
+    // }
 
     // --- ERC-20 wrapping ---------------------------------------------------------------
 
-    /**
-     * TODO make a helper to wrap and shield in 1 go
-     * `_amount` is deposited here and `_to` receives wrapped token as claim on this deposit
-     * @notice Creates a new wrapper token contract from a openzeppelin clone factory
-     * if it does not exist yet
-     * @return wrapper The wrapper token minted.
-     * @return minted Amount minted, which can differ from _amount on some tokens
-     * like fee on transfer tokens.
-     */
-    function wrapERC20(address _token, uint256 _amount, address _to)
-        external
-        nonReentrant
-        returns (address wrapper, uint256 minted)
-    {
-        if (closedPools[_token]) revert PoolIsClosed(_token);
+    // /**
+    //  * TODO make a helper to wrap and shield in 1 go
+    //  * `_amount` is deposited here and `_to` receives wrapped token as claim on this deposit
+    //  * @notice Creates a new wrapper token contract from a openzeppelin clone factory
+    //  * if it does not exist yet
+    //  * @return wrapper The wrapper token minted.
+    //  * @return minted Amount minted, which can differ from _amount on some tokens
+    //  * like fee on transfer tokens.
+    //  */
+    // function wrapERC20(address _token, uint256 _amount, address _to)
+    //     external
+    //     nonReentrant
+    //     returns (address wrapper, uint256 minted)
+    // {
+    //     if (closedPools[_token]) revert PoolIsClosed(_token);
 
-        wrapper = _getOrCreateERC20Wrapper(_token);
+    //     wrapper = _getOrCreateERC20Wrapper(_token);
 
-        // Check before balance to deal with fee on transfer tokens causing insolvency
-        uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
-        IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
-        minted = IERC20(_token).balanceOf(address(this)) - balanceBefore;
+    //     // Check before balance to deal with fee on transfer tokens causing insolvency
+    //     uint256 balanceBefore = IERC20(_token).balanceOf(address(this));
+    //     IERC20(_token).safeTransferFrom(msg.sender, address(this), _amount);
+    //     minted = IERC20(_token).balanceOf(address(this)) - balanceBefore;
 
-        WarptoadERC20(wrapper).mint(_to, minted);
-        emit ERC20Wrapped(_token, wrapper, _to, minted);
-    }
+    //     WarptoadERC20(wrapper).mint(_to, minted);
+    //     emit ERC20Wrapped(_token, wrapper, _to, minted);
+    // }
 
-    /**
-     * @notice Burns `_amount` of `_wrapper` from the caller and releases the same
-     * amount of underlying collateral to `_to`.
-     * @return token The underlying released.
-     */
-    function unwrapERC20(address _wrapper, uint256 _amount, address _to)
-        external
-        nonReentrant
-        returns (
-            address token // @TODO no definitions in returns. It's a foot gun jimjim fucks up a lott
-        )
-    {
-        token = underlyingOf[_wrapper].token;
-        if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
+    // /**
+    //  * @notice Burns `_amount` of `_wrapper` from the caller and releases the same
+    //  * amount of underlying collateral to `_to`.
+    //  * @return token The underlying released.
+    //  */
+    // function unwrapERC20(address _wrapper, uint256 _amount, address _to)
+    //     external
+    //     nonReentrant
+    //     returns (
+    //         address token // @TODO no definitions in returns. It's a foot gun jimjim fucks up a lott
+    //     )
+    // {
+    //     token = underlyingOf[_wrapper].token;
+    //     if (token == address(0) || erc20WrapperOf[token] != _wrapper) revert NotAWrapper(_wrapper);
 
-        WarptoadERC20(_wrapper).burn(msg.sender, _amount);
-        IERC20(token).safeTransfer(_to, _amount);
+    //     WarptoadERC20(_wrapper).burn(msg.sender, _amount);
+    //     IERC20(token).safeTransfer(_to, _amount);
 
-        emit ERC20Unwrapped(token, _wrapper, _to, _amount);
-    }
+    //     emit ERC20Unwrapped(token, _wrapper, _to, _amount);
+    // }
 
-    /**
-     * automatically deploy a wrapper contract clone if it does not exist yet
-     * @param _token which underlying to wrap
-     */
-    function _getOrCreateERC20Wrapper(address _token) private returns (address wrapper) {
-        wrapper = erc20WrapperOf[_token];
-        if (wrapper != address(0)) return wrapper;
+    // /**
+    //  * automatically deploy a wrapper contract clone if it does not exist yet
+    //  * @param _token which underlying to wrap
+    //  */
+    // function _getOrCreateERC20Wrapper(address _token) private returns (address wrapper) {
+    //     wrapper = erc20WrapperOf[_token];
+    //     if (wrapper != address(0)) return wrapper;
 
-        // deploy the contract
-        wrapper = address(
-            new WarptoadERC20(
-                _token,
-                _getTokenName(TokenMetadata.nameOf(_token)),
-                _getTokenSymbol(TokenMetadata.symbolOf(_token)),
-                TokenMetadata.decimalsOf(_token)
-            )
-        );
+    //     // deploy the contract
+    //     wrapper = address(
+    //         new WarptoadERC20(
+    //             _token,
+    //             _getTokenName(TokenMetadata.nameOf(_token)),
+    //             _getTokenSymbol(TokenMetadata.symbolOf(_token)),
+    //             TokenMetadata.decimalsOf(_token)
+    //         )
+    //     );
 
-        erc20WrapperOf[_token] = wrapper;
-        underlyingOf[wrapper] = Underlying({token: _token, chainWarpDomain: gigaIndex});
-        emit ERC20WrapperCreated(_token, wrapper);
-    }
+    //     erc20WrapperOf[_token] = wrapper;
+    //     underlyingOf[wrapper] = Underlying({token: _token, chainWarpDomain: gigaIndex});
+    //     emit ERC20WrapperCreated(_token, wrapper);
+    // }
 
     // is cute but wrapper tokens get burned upon shielding and get minted on different chains
     // so not a valid detection mechanism, but it might be possible if we swap out `WarptoadERC20(wrapper).totalSupply`
@@ -593,67 +566,67 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
     // --- ERC-1155  wrapping -------------------------------------------------------------
 
-    /**
-     * TODO 721 just support wrapping by default.
-     * `_amount` of the `_id` is deposited here and _to receives wrapped token as claim on this deposit
-     * @notice Creates a new wrapper token contract from a openzeppelin clone factory
-     * if it does not exist yet
-     * @return wrapper The wrapper collection minted.
-     */
-    function wrapERC1155(address _collection, uint256 _id, uint256 _amount, address _to)
-        external
-        nonReentrant
-        returns (address wrapper)
-    {
-        if (closedPools[_collection]) revert PoolIsClosed(_collection);
+    // /**
+    //  * TODO 721 just support wrapping by default.
+    //  * `_amount` of the `_id` is deposited here and _to receives wrapped token as claim on this deposit
+    //  * @notice Creates a new wrapper token contract from a openzeppelin clone factory
+    //  * if it does not exist yet
+    //  * @return wrapper The wrapper collection minted.
+    //  */
+    // function wrapERC1155(address _collection, uint256 _id, uint256 _amount, address _to)
+    //     external
+    //     nonReentrant
+    //     returns (address wrapper)
+    // {
+    //     if (closedPools[_collection]) revert PoolIsClosed(_collection);
 
-        wrapper = _getOrCreateERC1155Wrapper(_collection);
+    //     wrapper = _getOrCreateERC1155Wrapper(_collection);
 
-        IERC1155(_collection).safeTransferFrom(msg.sender, address(this), _id, _amount, "");
-        WarptoadERC1155(wrapper).mint(_to, _id, _amount);
+    //     IERC1155(_collection).safeTransferFrom(msg.sender, address(this), _id, _amount, "");
+    //     WarptoadERC1155(wrapper).mint(_to, _id, _amount);
 
-        emit ERC1155Wrapped(_collection, wrapper, _to, _id, _amount);
-    }
+    //     emit ERC1155Wrapped(_collection, wrapper, _to, _id, _amount);
+    // }
 
     //wrapERC721
 
-    /**
-     * @notice Burns `_amount` of `_wrapper`'s token `_id` from the caller and
-     * releases the underlying collateral to `_to`.
-     * @return collection The underlying collection released.
-     */
-    function unwrapERC1155(address _wrapper, uint256 _id, uint256 _amount, address _to)
-        external
-        nonReentrant
-        returns (address collection)
-    {
-        collection = underlyingOf[_wrapper].token;
-        if (collection == address(0) || erc1155WrapperOf[collection] != _wrapper) revert NotAWrapper(_wrapper);
+    // /**
+    //  * @notice Burns `_amount` of `_wrapper`'s token `_id` from the caller and
+    //  * releases the underlying collateral to `_to`.
+    //  * @return collection The underlying collection released.
+    //  */
+    // function unwrapERC1155(address _wrapper, uint256 _id, uint256 _amount, address _to)
+    //     external
+    //     nonReentrant
+    //     returns (address collection)
+    // {
+    //     collection = underlyingOf[_wrapper].token;
+    //     if (collection == address(0) || erc1155WrapperOf[collection] != _wrapper) revert NotAWrapper(_wrapper);
 
-        WarptoadERC1155(_wrapper).burn(msg.sender, _id, _amount);
-        IERC1155(collection).safeTransferFrom(address(this), _to, _id, _amount, "");
+    //     WarptoadERC1155(_wrapper).burn(msg.sender, _id, _amount);
+    //     IERC1155(collection).safeTransferFrom(address(this), _to, _id, _amount, "");
 
-        emit ERC1155Unwrapped(collection, _wrapper, _to, _id, _amount);
-    }
+    //     emit ERC1155Unwrapped(collection, _wrapper, _to, _id, _amount);
+    // }
 
-    /**
-     * @dev ERC-1155 has no standard name/symbol, so both are read best-effort from
-     * the collection and fall back to its address.
-     */
-    function _getOrCreateERC1155Wrapper(address _collection) private returns (address wrapper) {
-        wrapper = erc1155WrapperOf[_collection];
-        if (wrapper != address(0)) return wrapper;
+    // /**
+    //  * @dev ERC-1155 has no standard name/symbol, so both are read best-effort from
+    //  * the collection and fall back to its address.
+    //  */
+    // function _getOrCreateERC1155Wrapper(address _collection) private returns (address wrapper) {
+    //     wrapper = erc1155WrapperOf[_collection];
+    //     if (wrapper != address(0)) return wrapper;
 
-        wrapper = address(
-            new WarptoadERC1155(
-                _collection,
-                _getTokenName(TokenMetadata.nameOf(_collection)),
-                _getTokenSymbol(TokenMetadata.symbolOf(_collection))
-            )
-        );
+    //     wrapper = address(
+    //         new WarptoadERC1155(
+    //             _collection,
+    //             _getTokenName(TokenMetadata.nameOf(_collection)),
+    //             _getTokenSymbol(TokenMetadata.symbolOf(_collection))
+    //         )
+    //     );
 
-        erc1155WrapperOf[_collection] = wrapper;
-        underlyingOf[wrapper] = Underlying({token: _collection, chainWarpDomain: gigaIndex});
-        emit ERC1155WrapperCreated(_collection, wrapper);
-    }
+    //     erc1155WrapperOf[_collection] = wrapper;
+    //     underlyingOf[wrapper] = Underlying({token: _collection, chainWarpDomain: gigaIndex});
+    //     emit ERC1155WrapperCreated(_collection, wrapper);
+    // }
 }

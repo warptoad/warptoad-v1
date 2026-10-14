@@ -12,7 +12,7 @@ import {IERC1155MetadataURI} from "@openzeppelin/contracts/token/ERC1155/extensi
  * Token ids mirror the underlying collection's, so a wrapped balance of id `x`
  * is always redeemable for the same amount of the underlying's id `x`.
  */
-contract WarptoadERC1155 is ERC1155 {
+contract WrapperERC1155 is ERC1155 {
     /// @notice The vault that deployed this collection and is allowed to mint and burn it.
     address public immutable warptoad;
 
