@@ -370,7 +370,7 @@ fn main(
                 );
                 assert(
                     unshielding_commitment.amount == recipient_commitment.amount,
-                    "unshielding_commitment asset_id mismatch",
+                    "unshielding_commitment amount mismatch",
                 );
                 // note: sender does not usually know what pub_key the owner_hash has, we could add it so we can have more natural reading code
                 // where the unshielding public ethereum address is stored where normally we store the pub spending key
