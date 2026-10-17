@@ -17,14 +17,15 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  *                                |               commitment        otherLeafs..      |                     \
  * to refer to recipient          |              /     |    \                         |             # needed to verify leaf_index since we need it for the nullifier
  * without knowing                |             /      |     \
- * their chain or pubKey       pre_commitment_hash    asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
+ * their chain or pubKey       pre_commitment_hash  asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
  *         \                  /   |      \       \        \       
- *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(wrapperAddr,_wrapperAssetHash)
- *        / |       |        \   nonce   CONTRACT  \                                          |
- *       / /        |         \      |               circuit_component_storage_hash           ex: keccack(contractAddr,_id/_id/0, originGigaIndex, "ERC1155"/"ERC721"/"ERC20")
- *  spending  dest_giga_index  \   to blind commit                            |
- *   PubKey                     \                                         # ex in join_split: pre_nullifier
- *   X and y                   nullifier_secret                           # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
+ *        ----owner_hash------  shared_  CIRCUIT_ \       poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )
+ *        / |       |        \   nonce   CONTRACT  \                                                \ 
+ *       / /        |         \      |               circuit_component_storage_hash                 erc20=keccak(wrapperFactoryAddr,_wrapperAssetHash)        
+ *  spending  dest_giga_index  \   to blind commit                            |                                                         |
+ *   PubKey                     \                                             |                                                       keccak(wrapperAddr,underlyingAddr)
+ *   X and y                   nullifier_secret                           # ex in join_split: pre_nullifier,  
+ *                                   |                                    # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
  *                                   |                                    #   // taker_timer_start_pre_nullifier is to ensure, h(take_timer_pre_null, taker_null_secret) is not seen
  *                                   |                                    #   // basically it checks. Taker you better not start ur unlock timer while closing this trade. Or worse timer is already over and funds gone!
  *                                   |                                    # deferred_inclusion: pre_nullifier, deferred_root      
@@ -116,4 +117,8 @@ pub fn hash_fake_nullifier(nonce: Field) -> Field {
 // commitment_hashes are 3 inputs not 2
 pub fn hash_fake_commitment(nonce: Field) -> Field {
     Poseidon2::hash([nonce, FAKE_COMMITMENT_DOMAIN], 2)
+}
+
+pub fn hash_asset_id(first_giga_index: Field, last_giga_index: Field, wrapper_id: Field) -> Field {
+    Poseidon2::hash([first_giga_index, last_giga_index, wrapper_id], 3)
 }

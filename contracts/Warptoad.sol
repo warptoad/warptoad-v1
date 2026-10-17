@@ -100,10 +100,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     /// @notice mirrors `CIRCUIT_SIZE` in circuits/src/constants.nr: amount of spend and recipient commitment slots per proof
     uint256 public immutable CIRCUIT_SIZE;
     /// @dev roots, indexes, timestamps and public hash. Everything that isn't an array of CIRCUIT_SIZE
-    uint256 private constant PUBLIC_INPUTS_HEAD = 10;
-    /// @notice inclusive range of giga tree leaves a proof may spend from. TODO setter
-    uint256 public gigaFirstValidIndex;
-    uint256 public gigaLastValidIndex;
+    uint256 private constant PUBLIC_INPUTS_HEAD = 8;
 
     /// @notice every root the commitment tree ever had, and its size at that time. 0 means unknown root
     mapping(uint256 localRoot => uint256 treeSize) public localRoots;
@@ -151,27 +148,13 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     error UnshieldFailed(address wrapperFactory);
 
     /**
-     * @param _gigaIndex:
      * @param _verifier: WarptoadVerifier.sol, generated from the circuit with `pnpm noir`
      * @param _circuitSize: CIRCUIT_SIZE of the circuit `_verifier` was generated for
-     * @param _gigaFirstValidIndex: see gigaFirstValidIndex
-     * @param _gigaLastValidIndex: see gigaLastValidIndex
-     * @notice don't worry: can only be done at constructor or if a rebase token is detected (with closeUndercollateralizedPool)
-     * and you can always unwrap :D
      */
-    constructor(
-        uint64 _gigaIndex,
-        address _verifier,
-        uint256 _circuitSize,
-        // TODO make this configurable by wrapper contracts
-        uint256 _gigaFirstValidIndex,
-        uint256 _gigaLastValidIndex
-    ) {
-        gigaIndex = _gigaIndex;
+    constructor(address _verifier, uint256 _circuitSize, uint64 _gigaIndex) {
         verifier = IWarptoadVerifier(_verifier);
         CIRCUIT_SIZE = _circuitSize;
-        gigaFirstValidIndex = _gigaFirstValidIndex;
-        gigaLastValidIndex = _gigaLastValidIndex;
+        gigaIndex = _gigaIndex;
 
         SkinnyIMTPoseidon2WriteStorage.init(commitmentTree);
     }
@@ -229,14 +212,24 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         // here wrappers check that: 1. _expectedArgHash matches hashed _wrapperArgs
         // and burns users tokens.
         // It can also check things in _commitment, but we don't do anything with it and not planning to
-        uint256 _wrapperAssetHash = IWrapperFactory(_wrapperFactory).shield(
-            msg.sender,
-            _amount,
-            _wrapperArgs
+        (
+            uint256 _wrapperAssetHash,
+            uint256 _firstGigaIndex,
+            uint256 _lastGigaIndex
+        ) = IWrapperFactory(_wrapperFactory).shield(
+                msg.sender,
+                _amount,
+                _wrapperArgs
+            );
+
+        uint256 _wrapperId = keccak31Byte(
+            abi.encode(_wrapperFactory, _wrapperAssetHash)
         );
 
-        uint256 _assetId = keccak31Byte(
-            abi.encode(_wrapperFactory, _wrapperAssetHash)
+        uint256 _assetId = Poseidon2.hash_3(
+            _firstGigaIndex,
+            _lastGigaIndex,
+            _wrapperId
         );
         uint256 _commitment = Poseidon2.hash_3(
             _preCommitmentHash,
@@ -294,7 +287,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             hashPublic(_tx.messages),
             _tx.unshieldingCommitments,
             _tx.nullifiers,
-            _tx.recipientCommitmentsHashes
+            _tx.recipientCommitmentsHashes,
+            gigaIndex
         );
         if (!verifier.verify(_tx.proof, publicInputs))
             revert VerificationFailed();
@@ -377,10 +371,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             if (_unshieldData[i].assetId == 0) continue;
             if (i != firstShielded) revert UnshieldingSlotsNotFirst(i);
             firstShielded = i + 1;
-            _unshield(
-                _unshieldData[i],
-                _unshieldTargets[i]
-            );
+            _unshield(_unshieldData[i], _unshieldTargets[i]);
         }
         if (size > firstShielded)
             _insertCommitments(_commitmentsHashes[firstShielded:size]);
@@ -406,16 +397,32 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             revert RecipientNotAnAddress(_unshieldData.recipient);
 
         // let the wrapper factory handle minting the token
-        uint256 _wrapperAssetHash = IWrapperFactory(_unshieldTarget.wrapperFactory).unShield(
-            _recipeint,
-            _unshieldData.amount,
-            _unshieldTarget.wrapperArgs
-        );
+        (
+            uint256 _wrapperAssetHash,
+            uint256 _firstGigaIndex,
+            uint256 _lastGigaIndex
+        ) = IWrapperFactory(_unshieldTarget.wrapperFactory).unShield(
+                _recipeint,
+                _unshieldData.amount,
+                _unshieldTarget.wrapperArgs
+            );
 
         // we just called the wrapper to mint wrapper tokens. But we dont know if the assetId actually matches
         // we now need to check against _unshieldData.assetId, since that value is a constraint public input
-        uint256 _assetId = keccak31Byte(abi.encode(_unshieldTarget.wrapperFactory, _wrapperAssetHash));
-        require(_assetId == _unshieldData.assetId, "provided _assetId in UnshieldData does not match");
+        uint256 _wrapperId = keccak31Byte(
+            abi.encode(_unshieldTarget.wrapperFactory, _wrapperAssetHash)
+        );
+
+        uint256 _assetId = Poseidon2.hash_3(
+            _firstGigaIndex,
+            _lastGigaIndex,
+            _wrapperId
+        );
+
+        require(
+            _assetId == _unshieldData.assetId,
+            "provided _assetId in UnshieldData does not match"
+        );
 
         emit Unshielded(
             _unshieldTarget.wrapperFactory,
@@ -436,7 +443,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         uint256 _publicHash,
         UnshieldingCommitment[] calldata _unshieldingCommitments,
         uint256[] calldata _nullifiers,
-        uint256[] calldata _recipientCommitmentsHashes
+        uint256[] calldata _recipientCommitmentsHashes,
+        uint256 _gigaIndex
     ) public view returns (bytes32[] memory publicInputs) {
         uint256 size = CIRCUIT_SIZE;
         if (_unshieldingCommitments.length != size)
@@ -454,12 +462,10 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         publicInputs[1] = bytes32(_roots.localEdgeIndex);
         publicInputs[2] = bytes32(_roots.gigaRoot);
         publicInputs[3] = bytes32(_roots.gigaEdgeIndex);
-        publicInputs[4] = bytes32(gigaFirstValidIndex);
-        publicInputs[5] = bytes32(gigaLastValidIndex);
-        publicInputs[6] = bytes32(uint256(gigaIndex)); // current_giga_index
-        publicInputs[7] = bytes32(_timeStamps.proofExpireTimeStamp);
-        publicInputs[8] = bytes32(_timeStamps.historicTimeStamp);
-        publicInputs[9] = bytes32(_publicHash);
+        publicInputs[4] = bytes32(uint256(_gigaIndex)); // current_giga_index
+        publicInputs[5] = bytes32(_timeStamps.proofExpireTimeStamp);
+        publicInputs[6] = bytes32(_timeStamps.historicTimeStamp);
+        publicInputs[7] = bytes32(_publicHash);
 
         uint256 unshieldingOffset = PUBLIC_INPUTS_HEAD;
         uint256 nullifiersOffset = unshieldingOffset + size * 3;

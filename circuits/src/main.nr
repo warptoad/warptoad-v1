@@ -5,7 +5,7 @@ mod constants;
 use crate::merkle::{leaf_and_index_to_root, LeafAndIndexInclusionProof, LeafInclusionProof};
 
 use crate::hashing::{
-    hash_circuit_component_auth_sig, hash_circuit_component_storage, hash_commitment,
+    hash_asset_id, hash_circuit_component_auth_sig, hash_circuit_component_storage, hash_commitment,
     hash_fake_commitment, hash_fake_nullifier, hash_giga_leaf, hash_nullifier, hash_owner,
     hash_pre_commitment, hash_public, hash_spend_signature_inputs,
 };
@@ -23,19 +23,17 @@ fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
     local_root: Field,
     local_edge_index: Field,
     giga_edge_index: Field,
-    giga_first_valid_index: Field,
-    giga_last_valid_index: Field,
 ) -> Field {
-    assert(
-        greater_or_equal(proof.index, giga_first_valid_index),
-        "gigaProof index below valid_giga_index_range",
-    );
-    assert(
-        lower_or_equal(proof.index, giga_last_valid_index),
-        "gigaProof index above valid_giga_index_range",
-    );
     let giga_leaf: Field = hash_giga_leaf(local_root, local_edge_index);
     leaf_and_index_to_root(proof, giga_leaf, giga_edge_index)
+}
+
+fn check_giga_range(first_giga_index: Field, last_giga_index: Field, giga_index: Field) {
+    assert(
+        greater_or_equal(giga_index, first_giga_index),
+        "gigaProof index below first_giga_index",
+    );
+    assert(lower_or_equal(giga_index, last_giga_index), "gigaProof index above last_giga_index");
 }
 
 fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
@@ -43,8 +41,6 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     local_root: Field,
     local_edge_index: Field,
     giga_edge_index: Field,
-    giga_first_valid_index: Field,
-    giga_last_valid_index: Field,
     owner_hash: Field,
     current_giga_index: Field,
     actual_amount_spend_commitments: u32,
@@ -74,6 +70,24 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
                 spend_commitment.local_edge_index,
             );
 
+            let hashed_asset_id: Field = hash_asset_id(
+                spend_commitment.commitment.first_giga_index,
+                spend_commitment.commitment.last_giga_index,
+                spend_commitment.commitment.wrapper_id,
+            );
+            assert(spend_commitment.commitment.asset_id == hashed_asset_id, "incorrect asset_id");
+            // this handles the fact that giga tree is now permissionless
+            // this blocks bad actors exploiting a infinite mint bug, where the could just make a new giga_leaf
+            // and put anything they want in there. Like asset_id of warptoadETH, the set the amount to way too much! :0
+            // They can still do that, but the circuit will never treat it as spendable since that asset_id also needs
+            // the giga index range set by the wrapper factory. 
+            // And the wrapper factory only trust it's own range of indexes. Where only wrapperFactory can update the leaf
+            check_giga_range(
+                spend_commitment.commitment.first_giga_index,
+                spend_commitment.commitment.last_giga_index,
+                current_giga_index,
+            );
+
             // this checks if proof is on same chain, in which case we skip giga_root checks
             if (proven_commitments[index].local_root == local_root) {
                 // circuit components will get a 0x00 giga_root
@@ -90,8 +104,6 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
                     proven_commitments[index].local_root,
                     spend_commitment.local_edge_index,
                     giga_edge_index,
-                    giga_first_valid_index,
-                    giga_last_valid_index,
                 );
                 proven_commitments[index].giga_leaf_index = spend_commitment.giga_proof.index;
             }
@@ -139,6 +151,9 @@ struct CommitmentProofData {
     circuit_comp_storage: [Field; CIRCUIT_COMP_STORAGE_SIZE],
     asset_id: Field,
     amount: Field,
+    first_giga_index: Field,
+    last_giga_index: Field,
+    wrapper_id: Field,
 }
 
 struct CommitmentRecipientData {
@@ -197,8 +212,6 @@ pub struct PubRootsAndIndexes {
     local_edge_index: Field, // ^
     giga_root: Field, // verify spend commitment
     giga_edge_index: Field, // ^
-    giga_first_valid_index: Field, // ^
-    giga_last_valid_index: Field, // ^
     current_giga_index: Field, // to verify owner is on this chains giga_index
 }
 pub struct TimeStamps {
@@ -285,8 +298,6 @@ fn main(
             pub_in.roots.local_root,
             pub_in.roots.local_edge_index,
             pub_in.roots.giga_edge_index,
-            pub_in.roots.giga_first_valid_index,
-            pub_in.roots.giga_last_valid_index,
             owner_hash,
             pub_in.roots.current_giga_index,
             priv_in.actual_amount_spend_commitments,

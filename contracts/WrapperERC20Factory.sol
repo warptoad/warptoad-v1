@@ -63,6 +63,8 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
 
     address immutable warptoad;
     uint64 immutable gigaIndex;
+    uint256 immutable firstGigaIndex;
+    uint256 immutable lastGigaIndex;
 
     error OnlyWarptoad(address inCorrectCaller);
 
@@ -268,6 +270,10 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
         return keccak31Byte(_wrapperArgs);
     }
 
+    function _hashAssetArgs(address _wrapper, address _underlying ) public pure  returns (uint256) {
+        return  keccak31Byte(abi.encode(_wrapper, _underlying));
+    }
+
     modifier onlyWarptoad() {
         if (msg.sender != warptoad) {
             revert OnlyWarptoad(msg.sender);
@@ -279,19 +285,17 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
         address _from,
         uint256 _amount,
         bytes memory _args
-    ) external onlyWarptoad returns (uint256) {
-        uint256 _argsHash = _hashArgs(_args);
-        (address _wrapper, ) = _decodeAssetArgs(_args);
+    ) external onlyWarptoad returns (uint256,uint256,uint256) {
+        (address _wrapper, address _underlying) = _decodeAssetArgs(_args);
         _burn(_wrapper, _from, _amount);
-        return _argsHash;
+        return (_hashAssetArgs(_wrapper, _underlying), firstGigaIndex, lastGigaIndex);
     }
 
     function unShield(
         address _recipient,
         uint256 _amount,
         bytes memory _args
-    ) external onlyWarptoad returns (uint256) {
-        uint256 _argsHash = _hashArgs(_args);
+    ) external onlyWarptoad returns (uint256,uint256,uint256) {
         (address _wrapper, address _underlying) = _decodeAssetArgs(_args);
         // wrapper does not exist it always means it was bridged. And the orginal underlying is on another chain
         if (_wrapper.code.length == 0) {
@@ -311,6 +315,6 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
             _deploy(_underlying, _gigaIndex, underlyingInfo);
         }
         _mint(_wrapper, _recipient, _amount);
-        return _argsHash;
+        return (_hashAssetArgs(_wrapper, _underlying), firstGigaIndex, lastGigaIndex);
     }
 }

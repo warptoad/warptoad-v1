@@ -24,11 +24,11 @@ interface IWrapperFactory {
         address _from,
         uint256 _amount,
         bytes memory _wrapperArgs
-    ) external returns (uint256 _wrapperAssetHash);
+    ) external returns (uint256 _wrapperAssetHash, uint256 _firstGigaIndex, uint256 _lastGigaIndex);
 
     function unShield(
         address _recipient,
         uint256 _amount,
         bytes memory _wrapperArgs
-    ) external returns (uint256 _wrapperAssetHash);
+    ) external returns (uint256 _wrapperAssetHash, uint256 _firstGigaIndex, uint256 _lastGigaIndex);
 }
