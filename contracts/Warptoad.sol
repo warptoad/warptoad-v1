@@ -111,6 +111,16 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     /// @notice spent commitments. Stores the block number they got spent in, 0 means unspent
     mapping(uint256 nullifier => uint256 blockNumber) public nullifiers;
 
+    /// @notice where an assetId came from, see `registerAsset`. A wallet holding only an assetId (from an
+    /// encrypted note) rebuilds the preimage with eth_calls alone: the range is a view on `factory`,
+    /// `wrapperId = keccak31Byte(abi.encode(factory, wrapperAssetHash))`, and
+    /// `IWrapperFactory(factory).wrapperOf(wrapperAssetHash)` gives the wrapper for unshielding
+    struct AssetSource {
+        address factory;
+        uint256 wrapperAssetHash;
+    }
+    mapping(uint256 assetId => AssetSource) public assetSources;
+
     // TODO technically we don't need commitment?
     // practically i would be nice to look up: "did this commitment shield/unshield", so maybe keep it and make it indexed
     event Shielded(
@@ -138,6 +148,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     error WrongCircuitSize(uint256 expected, uint256 got);
     error UnknownLocalRoot(uint256 root);
     error WrongLocalEdgeIndex(uint256 expected, uint256 got);
+    error UnknownGigaRoot(uint256 root);
+    error WrongGigaEdgeIndex(uint256 expected, uint256 got);
     error UnshieldingSlotsNotFirst(uint256 slot);
     error ProofExpired(uint256 expiredAt, uint256 now);
     error HistoricTimeStampInFuture(uint256 historic, uint256 now);
@@ -208,7 +220,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         uint256 _amount,
         bytes calldata _wrapperArgs,
         bytes calldata _message
-    ) public {
+    ) public nonReentrant {
         // here wrappers check that: 1. _expectedArgHash matches hashed _wrapperArgs
         // and burns users tokens.
         // It can also check things in _commitment, but we don't do anything with it and not planning to
@@ -231,6 +243,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             _lastGigaIndex,
             _wrapperId
         );
+        // TODO is this redundant? A wrapper replying "this is my range" to a warptoad it committed to during deployment,
+        // and that warptoad instance was never in it's range??
+        require(gigaIndex >= _firstGigaIndex && gigaIndex <= _lastGigaIndex, "can't commit to a giga index range in _assetId which is out side of current giga index");
         uint256 _commitment = Poseidon2.hash_3(
             _preCommitmentHash,
             _assetId,
@@ -243,6 +258,29 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         localRoots[newRoot] = index + 1;
         emit Shielded(_wrapperFactory, _assetId, _amount, _commitment);
         emit Message(_commitment, _message);
+    }
+
+    /**
+     * @notice fills `assetSources` for an asset of the calling wrapper factory. Factories call this when they deploy
+     * a wrapper, so `shield` never has to check the slot. The factory is `msg.sender` and goes into the assetId, so a
+     * factory can only ever write slots of its own assets. Lying about its range only breaks its own lookups
+     * @return _assetId what notes of this asset carry
+     */
+    function registerAsset(
+        uint256 _firstGigaIndex,
+        uint256 _lastGigaIndex,
+        uint256 _wrapperAssetHash
+    ) external returns (uint256 _assetId) {
+        uint256 _wrapperId = keccak31Byte(
+            abi.encode(msg.sender, _wrapperAssetHash)
+        );
+        _assetId = Poseidon2.hash_3(
+            _firstGigaIndex,
+            _lastGigaIndex,
+            _wrapperId
+        );
+        // no slot check: same inputs always give the same values, and only this factory can reach this slot
+        assetSources[_assetId] = AssetSource(msg.sender, _wrapperAssetHash);
     }
 
     // /**
@@ -322,10 +360,20 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         if (treeSize == 0) revert UnknownLocalRoot(_roots.localRoot);
         if (_roots.localEdgeIndex != treeSize - 1)
             revert WrongLocalEdgeIndex(treeSize - 1, _roots.localEdgeIndex);
-        require(
-            _roots.gigaRoot == uint256(0),
-            "TODO plugin gigaRoot and check against history to enable cross-chain"
-        );
+        // gigaRoot == 0 is the "local only tx" sentinel, the circuit can't produce a giga root of 0.
+        // The edge index check matters: a prover chosen edge index proves the same leaf under a different
+        // index, which is a different nullifier, which is a cross-chain double spend. See merkle.nr
+        // TODO whatever relays giga roots into `gigaRoots` must store the tree size with the root, like
+        // `_insertCommitments` does for `localRoots`. A set of known roots alone can't validate the edge index
+        if (_roots.gigaRoot != 0) {
+            uint256 gigaTreeSize = gigaRoots[_roots.gigaRoot];
+            if (gigaTreeSize == 0) revert UnknownGigaRoot(_roots.gigaRoot);
+            if (_roots.gigaEdgeIndex != gigaTreeSize - 1)
+                revert WrongGigaEdgeIndex(
+                    gigaTreeSize - 1,
+                    _roots.gigaEdgeIndex
+                );
+        }
         if (_timeStamps.proofExpireTimeStamp < block.timestamp) {
             revert ProofExpired(
                 _timeStamps.proofExpireTimeStamp,

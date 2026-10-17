@@ -82,11 +82,6 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             // They can still do that, but the circuit will never treat it as spendable since that asset_id also needs
             // the giga index range set by the wrapper factory. 
             // And the wrapper factory only trust it's own range of indexes. Where only wrapperFactory can update the leaf
-            check_giga_range(
-                spend_commitment.commitment.first_giga_index,
-                spend_commitment.commitment.last_giga_index,
-                current_giga_index,
-            );
 
             // this checks if proof is on same chain, in which case we skip giga_root checks
             if (proven_commitments[index].local_root == local_root) {
@@ -107,6 +102,11 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
                 );
                 proven_commitments[index].giga_leaf_index = spend_commitment.giga_proof.index;
             }
+            check_giga_range(
+                spend_commitment.commitment.first_giga_index,
+                spend_commitment.commitment.last_giga_index,
+                proven_commitments[index].giga_leaf_index,
+            );
             proven_commitments[index].amount = spend_commitment.commitment.amount;
             proven_commitments[index].asset_id = spend_commitment.commitment.asset_id;
             proven_commitments[index].circuit_comp_selector =

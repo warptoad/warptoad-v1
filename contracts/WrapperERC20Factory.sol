@@ -55,6 +55,9 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
     // added gigaIndex because technically token can be deployed to the same address on multiple chains
     mapping(address underlying => mapping(uint64 gigaIndex => address wrapper)) wrappers;
     mapping(address wrapper => Underlying underlying) underlyings;
+    /// @notice inverse of `_hashAssetArgs`, written once per deployed wrapper. Lets a wallet go from the
+    /// `wrapperAssetHash` in `Warptoad.assetSources` to the wrapper, and from there to everything else by view calls
+    mapping(uint256 wrapperAssetHash => address wrapper) public wrapperOf;
 
     string symbolPreFix;
     string namePreFix;
@@ -161,6 +164,14 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
             gigaIndex: _gigaIndex
         });
         wrappers[_underlying][_gigaIndex] = _wrapper;
+        uint256 _wrapperAssetHash = _hashAssetArgs(_wrapper, _underlying);
+        wrapperOf[_wrapperAssetHash] = _wrapper;
+        // so wallets can find this asset's preimage from its assetId. Once per wrapper instead of a check per shield
+        IWarptoad(warptoad).registerAsset(
+            firstGigaIndex,
+            lastGigaIndex,
+            _wrapperAssetHash
+        );
         return _wrapper;
     }
 
@@ -272,6 +283,10 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
 
     function _hashAssetArgs(address _wrapper, address _underlying ) public pure  returns (uint256) {
         return  keccak31Byte(abi.encode(_wrapper, _underlying));
+    }
+
+    function gigaIndexRange() external view returns (uint256, uint256) {
+        return (firstGigaIndex, lastGigaIndex);
     }
 
     modifier onlyWarptoad() {

@@ -20,6 +20,17 @@ interface IWrapperFactory {
         address _to
     ) external returns (address);
 
+    // the giga leaf range this factory trusts, baked into every assetId of this factory. See Warptoad.registerAsset
+    function gigaIndexRange()
+        external
+        view
+        returns (uint256 _firstGigaIndex, uint256 _lastGigaIndex);
+
+    // the wrapper behind a `_wrapperAssetHash` returned by shield/unShield, address(0) if this factory never deployed it
+    function wrapperOf(
+        uint256 _wrapperAssetHash
+    ) external view returns (address);
+
     function shield(
         address _from,
         uint256 _amount,
