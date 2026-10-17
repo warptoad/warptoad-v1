@@ -65,7 +65,6 @@ struct UnshieldingCommitment {
 struct UnshieldTarget {
     address wrapperFactory;
     bytes wrapperArgs;
-    uint256 wrapperArgHash;
 }
 
 /// @dev everything `verifyShieldedTx` needs. All arrays are CIRCUIT_SIZE long
@@ -221,29 +220,29 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      */
     function shield(
         address _wrapperFactory,
-        uint256 _expectedArgHash,
         uint256 _preCommitmentHash,
         uint256 _amount,
         bytes calldata _wrapperArgs,
         bytes calldata _message
     ) public {
+        // here wrappers check that: 1. _expectedArgHash matches hashed _wrapperArgs
+        // and burns users tokens.
+        // It can also check things in _commitment, but we don't do anything with it and not planning to
+        uint256 _wrapperAssetHash = IWrapperFactory(_wrapperFactory).shield(
+            msg.sender,
+            _amount,
+            _wrapperArgs
+        );
+
         uint256 _assetId = keccak31Byte(
-            abi.encode(_wrapperFactory, _expectedArgHash)
+            abi.encode(_wrapperFactory, _wrapperAssetHash)
         );
         uint256 _commitment = Poseidon2.hash_3(
             _preCommitmentHash,
             _assetId,
             _amount
         );
-        // here wrappers check that: 1. _expectedArgHash matches hashed _wrapperArgs
-        // and burns users tokens.
-        // It can also check things in _commitment, but we don't do anything with it and not planning to
-        IWrapperFactory(_wrapperFactory).shield(
-            _amount,
-            _expectedArgHash,
-            _commitment,
-            _wrapperArgs
-        );
+
         (uint256 newRoot, uint256 index) = SkinnyIMTPoseidon2WriteStorage
             .insert(commitmentTree, _commitment);
         // +1 becuase 0 is sentinal value for "does not exist"
@@ -378,10 +377,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             if (i != firstShielded) revert UnshieldingSlotsNotFirst(i);
             firstShielded = i + 1;
             _unshield(
-
                 _unshieldData[i],
-                _unshieldTargets[i],
-                _commitmentsHashes[i]
+                _unshieldTargets[i]
             );
         }
         if (size > firstShielded)
@@ -401,32 +398,24 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      */
     function _unshield(
         UnshieldingCommitment calldata _unshieldData,
-        UnshieldTarget calldata _unshieldTarget,
-        uint256 _commitmentHash
+        UnshieldTarget calldata _unshieldTarget
     ) private {
         address _recipeint = address(uint160(_unshieldData.recipient));
         if (_unshieldData.recipient >> 160 != 0)
             revert RecipientNotAnAddress(_unshieldData.recipient);
-        uint256 expectedAssetId = keccak31Byte(
-            abi.encode(
-                _unshieldTarget.wrapperFactory,
-                _unshieldTarget.wrapperArgHash
-            )
-        );
-
-        require(
-            expectedAssetId == _unshieldData.assetId,
-            "assetId from commitment does not match assetId from wrapperFactory"
-        );
 
         // let the wrapper factory handle minting the token
-        IWrapperFactory(_unshieldTarget.wrapperFactory).unShield(
+        uint256 _wrapperAssetHash = IWrapperFactory(_unshieldTarget.wrapperFactory).unShield(
             _recipeint,
             _unshieldData.amount,
-            _unshieldTarget.wrapperArgHash,
-            _commitmentHash,
             _unshieldTarget.wrapperArgs
         );
+
+        // we just called the wrapper to mint wrapper tokens. But we dont know if the assetId actually matches
+        // we now need to check against _unshieldData.assetId, since that value is a constraint public input
+        uint256 _assetId = keccak31Byte(abi.encode(_unshieldTarget.wrapperFactory, _wrapperAssetHash));
+        require(_assetId == _unshieldData.assetId, "provided _assetId in UnshieldData does not match");
+
         emit Unshielded(
             _unshieldTarget.wrapperFactory,
             _recipeint,

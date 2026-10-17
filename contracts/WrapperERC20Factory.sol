@@ -7,6 +7,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {WrapperERC20} from "./WrapperERC20.sol";
 import {TokenMetadata} from "./libraries/TokenMetadata.sol";
 import {IWrapperFactory} from "./interfaces/IWrapperFactory.sol";
+import {IWarptoad} from "./interfaces/IWarptoad.sol";
 
 import {keccak31Byte} from "./Warptoad.sol";
 
@@ -40,24 +41,44 @@ event UnWrapped(
 contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
     using SafeERC20 for IERC20;
 
-    mapping(address wrapper => address underlying) underlyings;
-    mapping(address underlying => address wrapper) wrappers;
+    struct Underlying {
+        address contractAddr;
+        uint64 gigaIndex;
+    }
+
+    struct UnderlyingInfo {
+        string name;
+        string symbol;
+        uint256 decimals;
+    }
+    // added gigaIndex because technically token can be deployed to the same address on multiple chains
+    mapping(address underlying => mapping (uint64 gigaIndex => address wrapper)) wrappers;
+    mapping(address wrapper => Underlying underlying) underlyings;
+
 
     string symbolPreFix;
     string namePreFix;
     string public chainSymbol;
     string public chainName;
 
+    address immutable warptoad;
+    uint64 immutable gigaIndex;
+
+    error OnlyWarptoad(address inCorrectCaller);
+
     constructor(
         string memory _symbolPreFix,
         string memory _namePreFix,
         string memory _chainSymbol,
-        string memory _chainName
+        string memory _chainName,
+        address _warptoad
     ) {
         symbolPreFix = _symbolPreFix;
         namePreFix = _namePreFix;
         chainSymbol = _chainSymbol;
         chainName = _chainName;
+        warptoad = _warptoad;
+        gigaIndex= IWarptoad(warptoad).gigaIndex();
     }
 
     // Takes a symbol like USDC -> wtUSDC@eth for example on L1
@@ -83,19 +104,41 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
             );
     }
 
-    function _deploy(address _underlying) private returns (address) {
+    function getUnderlyingInfo(
+        address _underlying
+    ) public view returns (UnderlyingInfo memory) {
+        return
+            UnderlyingInfo(
+                _formatTokenName(TokenMetadata.nameOf(_underlying)),
+                _formatTokenSymbol(TokenMetadata.symbolOf(_underlying)),
+                TokenMetadata.decimalsOf(_underlying)
+            );
+    }
+
+    function _deploy(
+        address _underlying,
+        uint64 _gigaIndex,
+        UnderlyingInfo memory
+    ) private returns (address) {
+        // CREATE2 so the wrapper lands on the same address on every chain this factory is deployed on.
+        // The address commits to the init code, so to all constructor args. That is what makes
+        // `_deployedWrapper == _wrapper` in unShield actually verify the args. Salt can be constant
         // TODO switch statement?
-        address wrapper = address(
-            new WrapperERC20(
+        address _wrapper = address(
+            new WrapperERC20{salt: bytes32(0)}(
                 _underlying,
+                _gigaIndex,
                 _formatTokenName(TokenMetadata.nameOf(_underlying)),
                 _formatTokenSymbol(TokenMetadata.symbolOf(_underlying)),
                 TokenMetadata.decimalsOf(_underlying)
             )
         );
-        underlyings[wrapper] = _underlying;
-        wrappers[_underlying] = wrapper;
-        return wrapper;
+        underlyings[_wrapper] = Underlying({
+            contractAddr: _underlying,
+            gigaIndex: _gigaIndex
+        });
+        wrappers[_underlying][_gigaIndex] = _wrapper;
+        return _wrapper;
     }
 
     function _deposit(
@@ -128,12 +171,17 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
         uint256 _amount,
         address _to
     ) external nonReentrant returns (address) {
-        address _wrapper = wrappers[_underlying];
+        uint64 _gigaIndex = gigaIndex;
+        address _wrapper = wrappers[_underlying][_gigaIndex];
         if (_wrapper == address(0)) {
-            _wrapper = _deploy(_underlying);
+            _wrapper = _deploy(
+                _underlying,
+                _gigaIndex,
+                getUnderlyingInfo(_underlying)
+            );
         }
         _deposit(_underlying, msg.sender, _amount);
-        _mint(_wrapper, _to, _amount );
+        _mint(_wrapper, _to, _amount);
 
         emit Wrapped(_underlying, _wrapper, _to, _amount);
         return _wrapper;
@@ -144,20 +192,23 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
         uint256 _amount,
         address _to
     ) external nonReentrant returns (address) {
-        address _underlying = underlyings[_wrapper];
+        Underlying memory _underlying = underlyings[_wrapper];
         require(
-            _underlying != address(0),
+            _underlying.contractAddr != address(0),
             "no underlying token found for this wrapper"
         );
+        require(_underlying.gigaIndex == gigaIndex, "only unwrap on the same wrapperFactory on the same chain/gigaIndex");
 
         _burn(_wrapper, msg.sender, _amount);
-        _withdraw(_underlying, _to, _amount);
+        _withdraw(_underlying.contractAddr, _to, _amount);
 
-        emit UnWrapped(_underlying, _wrapper, _to, _amount);
-        return _underlying;
+        emit UnWrapped(_underlying.contractAddr, _wrapper, _to, _amount);
+        return _underlying.contractAddr;
     }
 
-    function _decodeArgs(bytes memory _wrapperArgs) public returns (address,address, uint256) {
+    function _decodeAssetArgs(
+        bytes memory _wrapperArgs
+    ) public pure returns (address, address) {
         // Some tokens are deployed to the same address on multiple chains.
         // And since the accounting of our wrapperFactory only stores underlying tokens on one chain,
         // only checking `_underlying` address can cause unexpected scenerarios where users cant unwrap!
@@ -168,33 +219,81 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
         // TODO shrink _wrappingOrginIndex to smaller size then 256
 
         // both _wrappeer and _underlying here to save on a expensive mapping lookup!
-        (address _wrapper, address _underlying, uint256 _wrappingOrginIndex) = abi.decode(_wrapperArgs, (address,address, uint256));
-        return (_wrapper, _underlying,_wrappingOrginIndex);
+        (address _wrapper, address _underlying) = abi.decode(
+            _wrapperArgs,
+            (address, address)
+        );
+        return (_wrapper, _underlying);
     }
 
-    function _hashArgs(bytes memory _wrapperArgs) public returns (uint256) {
+    function _decodeWrapperInfo(
+        bytes memory _wrapperArgs
+    ) private pure returns (UnderlyingInfo memory, uint64) {
+        // TODO can we save a bit of gas by making _decodeAssetArgs return the left over bytes?
+        // then decoding those so we dont spend on the 2 addresses?
+        (
+            ,
+            ,
+            string memory _name,
+            string memory _symbol,
+            uint256 _decimals,
+            uint64 _gigaIndex
+        ) = abi.decode(
+                _wrapperArgs,
+                (address, address, string, string, uint256, uint64)
+            );
+        return (UnderlyingInfo(_name, _symbol, _decimals), _gigaIndex);
+    }
+
+    function _hashArgs(
+        bytes memory _wrapperArgs
+    ) public pure returns (uint256) {
         return keccak31Byte(_wrapperArgs);
     }
 
+    modifier onlyWarptoad() {
+        if (msg.sender != warptoad) {
+            revert OnlyWarptoad(msg.sender);
+        }
+        _;
+    }
+
     function shield(
+        address _from,
         uint256 _amount,
-        uint256 _expectedArgHash,
-        uint256 ,
-        bytes memory _wrapperArgs
-    ) external  {
-        require(_hashArgs(_wrapperArgs) == _expectedArgHash, "_wrapperArgs mismatch with _expectedArgHash");
-        (address _wrapper, , uint256 _wrappingOrginIndex) = _decodeArgs(_wrapperArgs);
-        _burn(_wrapper, msg.sender, _amount);
+        bytes memory _args
+    ) external onlyWarptoad returns (uint256) {
+        uint256 _argsHash = _hashArgs(_args);
+        (address _wrapper, ) = _decodeAssetArgs(_args);
+        _burn(_wrapper, _from, _amount);
+        return _argsHash;
     }
 
     function unShield(
         address _recipient,
         uint256 _amount,
-        uint256 _expectedArgHash,
-        uint256 _commitmentHash,
-        bytes memory _wrapperArgs
-    ) external {
+        bytes memory _args
+    ) external onlyWarptoad returns (uint256) {
+        uint256 _argsHash = _hashArgs(_args);
+        (address _wrapper, address _underlying) = _decodeAssetArgs(_args);
         // wrapper does not exist it always means it was bridged. And the orginal underlying is on another chain
+        if (_wrapper.code.length == 0) {
+            (
+                UnderlyingInfo memory underlyingInfo,
+                uint64 _gigaIndex
+            ) = _decodeWrapperInfo(_args);
+            address _deployedWrapper = _deploy(
+                _underlying,
+                _gigaIndex,
+                underlyingInfo
+            );
+            require(
+                _deployedWrapper == _wrapper,
+                "deployed wrapper does not match expected wrapper from assetId, please make sure _wrapperArgs contains exactly `_name,  _symbol, _decimals, _gigaIndex` of the wrapper on the orginal chain"
+            );
+        }
+        _mint(_wrapper, _recipient, _amount);
+        return _argsHash;
     }
     // TODO make sure to not rely on underlying token is in here to unwrap
     // since some tokens have the same address on multiple chains

@@ -19,7 +19,7 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  * without knowing                |             /      |     \
  * their chain or pubKey       pre_commitment_hash    asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
  *         \                  /   |      \       \        \       
- *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(wrapperAddr,wrapperArgsHash)
+ *        ----owner_hash------  shared_  CIRCUIT_ \       erc20=keccak(wrapperAddr,_wrapperAssetHash)
  *        / |       |        \   nonce   CONTRACT  \                                          |
  *       / /        |         \      |               circuit_component_storage_hash           ex: keccack(contractAddr,_id/_id/0, originGigaIndex, "ERC1155"/"ERC721"/"ERC20")
  *  spending  dest_giga_index  \   to blind commit                            |

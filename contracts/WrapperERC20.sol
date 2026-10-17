@@ -11,9 +11,11 @@ contract WrapperERC20 is ERC20 {
     /// @notice The token this one is a wrapped representation of.
     address public immutable underlying;
 
+    uint64 public immutable originGigaIndex;
+
     uint8 private immutable _decimals;
 
-    error OnlyFactory(address caller);
+    error OnlyFactory(address inCorrectCaller);
 
     modifier onlyFactory() {
         if (msg.sender != factory) {
@@ -22,9 +24,10 @@ contract WrapperERC20 is ERC20 {
         _;
     }
 
-    constructor(address _underlying, string memory _name, string memory _symbol, uint8 _underlyingDecimals)
+    constructor(address _underlying, uint64 _originGigaIndex, string memory _name, string memory _symbol, uint8 _underlyingDecimals)
         ERC20(_name, _symbol)
     {
+        originGigaIndex = _originGigaIndex;
         factory = msg.sender;
         underlying = _underlying;
         _decimals = _underlyingDecimals;

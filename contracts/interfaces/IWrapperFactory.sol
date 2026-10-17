@@ -21,27 +21,14 @@ interface IWrapperFactory {
     ) external returns (address);
 
     function shield(
+        address _from,
         uint256 _amount,
-        // in this function we check that _wrapperArgs causes a correct hash that matches _expectedArgHash
-        // then we burn `_amount` wrapper tokens from `msg.sender`
-        uint256 _expectedArgHash,
-        // `_commitmentHash` extra, not needed our use warptoads usecase, but allows to additional logic to gate unshielding
-        // based on the commitHash like revealing part of it's pre image
-        uint256 _commitmentHash,
-        // to reproduce _expectedArgHash
         bytes memory _wrapperArgs
-    ) external;
+    ) external returns (uint256 _wrapperAssetHash);
 
     function unShield(
         address _recipient,
         uint256 _amount,
-        // in this function we check that _wrapperArgs causes a correct hash that matches _expectedArgHash
-        // then we mint `_amount` wrapper tokens and send it to  `_recipient`
-        uint256 _expectedArgHash,
-        // `_commitmentHash` extra, not needed our use warptoads usecase, but allows to additional logic to gate unshielding
-        // based on the commitHash like revealing part of it's pre image
-        uint256 _commitmentHash,
-        // to reproduce _expectedArgHash
         bytes memory _wrapperArgs
-    ) external;
+    ) external returns (uint256 _wrapperAssetHash);
 }
