@@ -163,6 +163,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         uint64 _gigaIndex,
         address _verifier,
         uint256 _circuitSize,
+        // TODO make this configurable by wrapper contracts
         uint256 _gigaFirstValidIndex,
         uint256 _gigaLastValidIndex
     ) {

@@ -2,6 +2,7 @@
 pragma solidity ^0.8.28;
 
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import {Create2} from "@openzeppelin/contracts/utils/Create2.sol";
 import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import {WrapperERC20} from "./WrapperERC20.sol";
@@ -49,12 +50,11 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
     struct UnderlyingInfo {
         string name;
         string symbol;
-        uint256 decimals;
+        uint8 decimals;
     }
     // added gigaIndex because technically token can be deployed to the same address on multiple chains
-    mapping(address underlying => mapping (uint64 gigaIndex => address wrapper)) wrappers;
+    mapping(address underlying => mapping(uint64 gigaIndex => address wrapper)) wrappers;
     mapping(address wrapper => Underlying underlying) underlyings;
-
 
     string symbolPreFix;
     string namePreFix;
@@ -78,7 +78,7 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
         chainSymbol = _chainSymbol;
         chainName = _chainName;
         warptoad = _warptoad;
-        gigaIndex= IWarptoad(warptoad).gigaIndex();
+        gigaIndex = IWarptoad(warptoad).gigaIndex();
     }
 
     // Takes a symbol like USDC -> wtUSDC@eth for example on L1
@@ -115,10 +115,31 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
             );
     }
 
+    /// @dev the address `_deploy` will give these args, without deploying. Same CREATE2 formula and constant salt
+    function _computeWrapperAddress(
+        address _underlying,
+        uint64 _gigaIndex,
+        UnderlyingInfo memory underlyingInfo
+    ) private view returns (address) {
+        bytes32 _initCodeHash = keccak256(
+            abi.encodePacked(
+                type(WrapperERC20).creationCode,
+                abi.encode(
+                    _underlying,
+                    _gigaIndex,
+                    underlyingInfo.name,
+                    underlyingInfo.symbol,
+                    underlyingInfo.decimals
+                )
+            )
+        );
+        return Create2.computeAddress(bytes32(0), _initCodeHash);
+    }
+
     function _deploy(
         address _underlying,
         uint64 _gigaIndex,
-        UnderlyingInfo memory
+        UnderlyingInfo memory underlyingInfo
     ) private returns (address) {
         // CREATE2 so the wrapper lands on the same address on every chain this factory is deployed on.
         // The address commits to the init code, so to all constructor args. That is what makes
@@ -128,9 +149,9 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
             new WrapperERC20{salt: bytes32(0)}(
                 _underlying,
                 _gigaIndex,
-                _formatTokenName(TokenMetadata.nameOf(_underlying)),
-                _formatTokenSymbol(TokenMetadata.symbolOf(_underlying)),
-                TokenMetadata.decimalsOf(_underlying)
+                underlyingInfo.name,
+                underlyingInfo.symbol,
+                underlyingInfo.decimals
             )
         );
         underlyings[_wrapper] = Underlying({
@@ -197,7 +218,10 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
             _underlying.contractAddr != address(0),
             "no underlying token found for this wrapper"
         );
-        require(_underlying.gigaIndex == gigaIndex, "only unwrap on the same wrapperFactory on the same chain/gigaIndex");
+        require(
+            _underlying.gigaIndex == gigaIndex,
+            "only unwrap on the same wrapperFactory on the same chain/gigaIndex"
+        );
 
         _burn(_wrapper, msg.sender, _amount);
         _withdraw(_underlying.contractAddr, _to, _amount);
@@ -209,16 +233,9 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
     function _decodeAssetArgs(
         bytes memory _wrapperArgs
     ) public pure returns (address, address) {
-        // Some tokens are deployed to the same address on multiple chains.
-        // And since the accounting of our wrapperFactory only stores underlying tokens on one chain,
-        // only checking `_underlying` address can cause unexpected scenerarios where users cant unwrap!
-
-        // so we differentiate on which gigaIndex a token was wrapped to enforce "only unwrap on one chain (aka gigaIndex)"
-        // that is what`_wrappingOrginIndex` is for. I does not doxx where a user came from and shielded.
-
-        // TODO shrink _wrappingOrginIndex to smaller size then 256
-
-        // both _wrappeer and _underlying here to save on a expensive mapping lookup!
+        // only the first 2 fields of `_wrapperArgs`, the rest (name, symbol, decimals, origin gigaIndex) is only
+        // needed when the wrapper has to be deployed, see `_decodeWrapperInfo`.
+        // both _wrapper and _underlying here to save on a expensive mapping lookup!
         (address _wrapper, address _underlying) = abi.decode(
             _wrapperArgs,
             (address, address)
@@ -236,11 +253,11 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
             ,
             string memory _name,
             string memory _symbol,
-            uint256 _decimals,
+            uint8 _decimals,
             uint64 _gigaIndex
         ) = abi.decode(
                 _wrapperArgs,
-                (address, address, string, string, uint256, uint64)
+                (address, address, string, string, uint8, uint64)
             );
         return (UnderlyingInfo(_name, _symbol, _decimals), _gigaIndex);
     }
@@ -282,21 +299,18 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
                 UnderlyingInfo memory underlyingInfo,
                 uint64 _gigaIndex
             ) = _decodeWrapperInfo(_args);
-            address _deployedWrapper = _deploy(
-                _underlying,
-                _gigaIndex,
-                underlyingInfo
-            );
+            // check before deploying so wrong args revert without paying for the deploy
             require(
-                _deployedWrapper == _wrapper,
+                _computeWrapperAddress(
+                    _underlying,
+                    _gigaIndex,
+                    underlyingInfo
+                ) == _wrapper,
                 "deployed wrapper does not match expected wrapper from assetId, please make sure _wrapperArgs contains exactly `_name,  _symbol, _decimals, _gigaIndex` of the wrapper on the orginal chain"
             );
+            _deploy(_underlying, _gigaIndex, underlyingInfo);
         }
         _mint(_wrapper, _recipient, _amount);
         return _argsHash;
     }
-    // TODO make sure to not rely on underlying token is in here to unwrap
-    // since some tokens have the same address on multiple chains
-    // otherwise you have a accounting headache
-    // unshield()
 }
