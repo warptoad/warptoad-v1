@@ -9,6 +9,7 @@ import {WrapperERC20} from "./WrapperERC20.sol";
 import {TokenMetadata} from "./libraries/TokenMetadata.sol";
 import {IWrapperFactory} from "./interfaces/IWrapperFactory.sol";
 import {IWarptoad} from "./interfaces/IWarptoad.sol";
+import {IChainConfig, ChainInfo} from "./interfaces/IChainConfig.sol";
 
 import {keccak31Byte} from "./Warptoad.sol";
 
@@ -71,17 +72,22 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
 
     error OnlyWarptoad(address inCorrectCaller);
 
+    /**
+     * @param _symbolPreFix, _namePreFix: same on every chain, ex "wt" and "Warptoad"
+     * @param _chainConfig: see ChainConfig.sol. chainSymbol and chainName come from there based on `block.chainid`
+     * so this constructor has no chain specific args and the init code is the same on every chain
+     */
     constructor(
         string memory _symbolPreFix,
         string memory _namePreFix,
-        string memory _chainSymbol,
-        string memory _chainName,
-        address _warptoad
+        address _warptoad,
+        address _chainConfig
     ) {
         symbolPreFix = _symbolPreFix;
         namePreFix = _namePreFix;
-        chainSymbol = _chainSymbol;
-        chainName = _chainName;
+        ChainInfo memory _chain = IChainConfig(_chainConfig).info();
+        chainSymbol = _chain.chainSymbol;
+        chainName = _chain.chainName;
         warptoad = _warptoad;
         gigaIndex = IWarptoad(warptoad).gigaIndex();
     }

@@ -47,6 +47,57 @@ export const CHAIN_INFO = {
 export type ChainInfo = { symbol: string; name: string }
 export type SupportedChainId = keyof typeof CHAIN_INFO
 
+/**
+ * Leaf index of each chain in the giga tree. Mainnet and sepolia are separate giga trees, so they reuse the same
+ * indexes. Only chains listed here can run Warptoad, see contracts/ChainConfig.sol.
+ *
+ * Append only: an index is baked into every owner hash and nullifier on that chain, moving one is a hard fork.
+ */
+export const GIGA_INDEX = {
+  mainnet: {
+    1:        0, // Ethereum
+    42161:    1, // Arbitrum
+    10:       2, // Optimism
+    8453:     3, // Base
+    324:      4, // ZKsync
+    1027303:  5, // Facet
+  },
+  sepolia: {
+    11155111: 0, // Ethereum Sepolia
+    421614:   1, // Arbitrum Sepolia
+    11155420: 2, // Optimism Sepolia
+    84532:    3, // Base Sepolia
+    300:      4, // ZKsync Sepolia
+    16436858: 5, // Facet Sepolia
+  },
+  // hardhat / anvil. Never in a production ChainConfig
+  local: {
+    31337:    0,
+  },
+} as const satisfies Record<string, Partial<Record<SupportedChainId, number>>>
+
+export type ChainConfigArgs = readonly [
+  chainIds: bigint[],
+  infos: { gigaIndex: bigint; chainSymbol: string; chainName: string }[],
+]
+
+/**
+ * Constructor args for contracts/ChainConfig.sol. Both mainnet and sepolia go in, always, so the init code and
+ * therefore the CREATE2 address of ChainConfig is the same on every chain. `local` is only for tests.
+ */
+export function chainConfigArgs(sets: (keyof typeof GIGA_INDEX)[] = ["mainnet", "sepolia"]): ChainConfigArgs {
+  const chainIds: bigint[] = []
+  const infos: ChainConfigArgs[1] = []
+  for (const set of sets) {
+    for (const [id, gigaIndex] of Object.entries(GIGA_INDEX[set])) {
+      const labels = chainName(Number(id))
+      chainIds.push(BigInt(id))
+      infos.push({ gigaIndex: BigInt(gigaIndex), chainSymbol: labels.symbol, chainName: labels.name })
+    }
+  }
+  return [chainIds, infos]
+}
+
 export function isSupportedChainId(chainId: number): chainId is SupportedChainId {
   return chainId in CHAIN_INFO
 }

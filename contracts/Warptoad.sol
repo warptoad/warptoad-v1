@@ -8,6 +8,7 @@ import {ERC1155Holder} from "@openzeppelin/contracts/token/ERC1155/utils/ERC1155
 import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 
 import {IWrapperFactory} from "./interfaces/IWrapperFactory.sol";
+import {IChainConfig} from "./interfaces/IChainConfig.sol";
 
 // TODO prob should be interfaces
 import {WrapperERC20} from "./WrapperERC20.sol";
@@ -163,10 +164,18 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * @param _verifier: WarptoadVerifier.sol, generated from the circuit with `pnpm noir`
      * @param _circuitSize: CIRCUIT_SIZE of the circuit `_verifier` was generated for
      */
-    constructor(address _verifier, uint256 _circuitSize, uint64 _gigaIndex) {
+    /**
+     * @param _chainConfig: see ChainConfig.sol. The giga index comes from there based on `block.chainid` so this
+     * constructor has no chain specific args and the init code is the same on every chain
+     */
+    constructor(
+        address _verifier,
+        uint256 _circuitSize,
+        address _chainConfig
+    ) {
         verifier = IWarptoadVerifier(_verifier);
         CIRCUIT_SIZE = _circuitSize;
-        gigaIndex = _gigaIndex;
+        gigaIndex = IChainConfig(_chainConfig).gigaIndex();
 
         SkinnyIMTPoseidon2WriteStorage.init(commitmentTree);
     }
