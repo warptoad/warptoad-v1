@@ -3,8 +3,9 @@
  *
  *   1. alice wraps 1000 and shields 400 to herself, with a note encrypted to her own view key
  *   2. alice sends bob 300 and 100 change, one encrypted note per slot, fakes get garbage.
- *      A relayer that swaps a message gets VerificationFailed, the messages are in public_hash
- *   3. bob and alice scan every Message event and find exactly their own notes
+ *      A relayer that swaps a message gets a verifier revert, the messages are in public_hash
+ *   3. bob and alice scan every Message event and find exactly their own notes. Bob turns the assetId in his
+ *      note back into the asset preimage and the wrapper with eth_calls only, see src/assets.ts
  *   4. bob unshields the note he found into wrapped USDC and unwraps it into the real thing
  *
  * So the full round trip: wrap, shield, shielded tx to bob, unshield, unwrap
@@ -14,7 +15,7 @@
  * Also runs against a real deployment, sending the same txs on chain (see README, Deploy):
  *   pnpm hardhat run test/ClaudeLilMessaging.test.ts --network sepolia
  * `run` and not `test`: the test task refuses to unlock the password protected keystore, `run` prompts for it.
- * Warptoad and the verifier come from ignition/deployments/chain-<id>/, only a MockERC20 gets deployed.
+ * Warptoad, the factory and the verifier come from ignition/deployments/chain-<id>/, only a MockERC20 gets deployed.
  * Alice and bob are both the one configured account, and nonces are randomised so reruns don't collide
  */
 import assert from "node:assert/strict";
@@ -24,10 +25,10 @@ import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { network } from "hardhat";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
-import type { Note, WarptoadContract } from "../src/types.js";
-import { chainName, NAME_PREFIX, SYMBOL_PREFIX } from "../src/config.js";
-import { CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
+import type { Asset, Note, WarptoadContract, WrapperERC20Contract, WrapperFactoryContract } from "../src/types.js";
+import { CIRCUIT_COMP_STORAGE_EMPTY_HASH, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
 import {
+    hashAssetId,
     hashFakeCommitment,
     hashFakeNullifier,
     hashNullifier,
@@ -50,21 +51,17 @@ import {
     syncedTree,
     unshieldInput,
 } from "../src/proving.js";
+import { assetOf, encodeWrapperArgs, encodeWrapperDeployArgs, resolveAsset } from "../src/assets.js";
 import { decryptNote, deriveViewKey, encryptNote, fakeMessage, getAllNotes, publicHashOf } from "../src/messages.js";
-import { deployCreate2, type Create2Artifact, deployCreate2Factory } from "@warptoad/skinny-fat-imt-js/create2";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { Barretenberg, UltraHonkBackend } from "@aztec/bb.js";
-import type { Address, Hex } from "viem";
+import { getAddress, type Address, type Hex } from "viem";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
-import skinnyIMTArtifact from "@warptoad/skinny-fat-imt-js/create2/evm-artifacts/SkinnyIMTPoseidon2WriteStorage" with { type: "json" };
-import IMTSalts from "@warptoad/skinny-fat-imt-js/create2/evm-artifacts/create2-salts.json" with { type: "json" };
-import poseidon2YulArtifact from "poseidon2-evm/out/Poseidon2Yul.sol/Poseidon2Yul_BN254.json" with { type: "json" };
+import { deployInfra, deployWarptoad, wrap, ZERO_ADDRESS } from "./fixtures.js";
 
-const POSEIDON2_YUL = "0xB2542195Ad96AcfBC962C48A97D7640A9F5386D2" as const;
-const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000" as const;
 const noUnshieldCommitment = { recipient: 0n, amount: 0n, assetId: 0n };
-const noTarget = { wrapper: ZERO_ADDRESS, id: 0n };
+const noTarget = { wrapperFactory: ZERO_ADDRESS, wrapperArgs: "0x" as Hex };
 /** MockERC20 ("USD Coin", "USDC", 6) to reuse on a live chain, anyone can mint it. A chain not in here gets a fresh one */
 const MOCK_ERC20: Record<number, Address> = {
     11155111: "0x5afC539F572A1C4CF4c7FcC4ef3169c232F9c0E4",
@@ -96,13 +93,15 @@ describe("ClaudeLilMessaging", async function () {
     let scanFromBlock = 0n;
 
     let warptoad: WarptoadContract;
+    let factory: WrapperFactoryContract;
     let token: ContractReturnType<"MockERC20">;
-    let wrapper: ContractReturnType<"WarptoadERC20">;
+    let wrapper: WrapperERC20Contract;
     let bb: Barretenberg;
     let backend: UltraHonkBackend;
     let treeId: bigint;
+    let gigaIndex: bigint;
+    let asset: Asset;
     let assetId: bigint;
-    const gigaIndex = 0n;
 
     // one secret each, the view key is derived from it. Alice only ever learns bob's ownerHash and view public key
     const alice = {
@@ -119,11 +118,6 @@ describe("ClaudeLilMessaging", async function () {
         ownerHash: 0n,
         view: deriveViewKey("bob's eddsa key"),
     };
-    for (const who of [alice, bob]) {
-        const [x, y] = derivePublicKey(who.eddsaKey);
-        who.pubKey = { x, y };
-        who.ownerHash = hashOwner({ spendPubKey: who.pubKey, destGigaIndex: gigaIndex, nullifierSecret: who.nullifierSecret });
-    }
 
     let aliceDeposit: Note;
     let bobNote: Note;
@@ -139,28 +133,18 @@ describe("ClaudeLilMessaging", async function () {
             scanFromBlock = await publicClient.getBlockNumber();
             const deployed = JSON.parse(await readFile(`ignition/deployments/chain-${chainId}/deployed_addresses.json`, "utf8"));
             warptoad = await viem.getContractAt("Warptoad", deployed["Warptoad#Warptoad"]);
+            factory = await viem.getContractAt("WrapperFactory", deployed["Warptoad#WrapperFactory"]);
         } else {
-            await deployCreate2Factory(publicClient, deployer, deployer.account);
-            const skinnyIMT = await deployCreate2({
-                artifact: skinnyIMTArtifact as Create2Artifact,
-                salt: IMTSalts.SkinnyIMTPoseidon2WriteStorage[0] as Hex,
-                walletClient: deployer,
-                publicClient: publicClient,
-            });
-            const testClient = await viem.getTestClient();
-            await testClient.setCode({
-                address: POSEIDON2_YUL,
-                bytecode: poseidon2YulArtifact.deployedBytecode.object as Hex,
-            });
-            const verifier = await viem.deployContract("WarptoadVerifier");
-            const chainLabels = chainName(chainId);
-            warptoad = await viem.deployContract(
-                "Warptoad",
-                [SYMBOL_PREFIX, NAME_PREFIX, chainLabels.symbol, chainLabels.name, gigaIndex, verifier.address, BigInt(CIRCUIT_SIZE), 0n, 0n, []],
-                { libraries: { SkinnyIMTPoseidon2WriteStorage: skinnyIMT.address } },
-            );
+            ({ warptoad, factory } = await deployWarptoad(viem, await deployInfra(viem, publicClient, deployer)));
         }
         treeId = await warptoad.read.commitmentTreeId();
+        // owner hashes are bound to the chain they can be spent on, so they wait for the contract's giga index
+        gigaIndex = BigInt(await warptoad.read.gigaIndex());
+        for (const who of [alice, bob]) {
+            const [x, y] = derivePublicKey(who.eddsaKey);
+            who.pubKey = { x, y };
+            who.ownerHash = hashOwner({ spendPubKey: who.pubKey, destGigaIndex: gigaIndex, nullifierSecret: who.nullifierSecret });
+        }
 
         const mockAddress = MOCK_ERC20[chainId];
         if (mockAddress !== undefined) {
@@ -170,7 +154,7 @@ describe("ClaudeLilMessaging", async function () {
             if (live) console.log(`deployed MockERC20 at ${token.address}, add it to MOCK_ERC20 to reuse it`);
         }
         await send(token.write.mint([aliceWallet.account.address, 1000n]));
-        await send(token.write.approve([warptoad.address, 1000n], { account: aliceWallet.account }));
+        await send(token.write.approve([factory.address, 1000n], { account: aliceWallet.account }));
 
         bb = await Barretenberg.new({ threads: cpus().length });
         backend = new UltraHonkBackend(circuit.bytecode, bb);
@@ -194,9 +178,10 @@ describe("ClaudeLilMessaging", async function () {
     });
 
     it("1. alice wraps and shields 400, with a note to herself", async () => {
-        await send(warptoad.write.wrapERC20([token.address, 1000n, aliceWallet.account.address], { account: aliceWallet.account }));
-        wrapper = await viem.getContractAt("WarptoadERC20", await warptoad.read.erc20WrapperOf([token.address]));
-        assetId = await warptoad.read.hashAssetId([token.address, 0n, gigaIndex, 0]);
+        wrapper = await wrap(viem, { factory, gigaIndex },token.address, 1000n, aliceWallet.account.address, aliceWallet.account.address);
+        const [firstGigaIndex, lastGigaIndex] = await factory.read.gigaIndexRange();
+        asset = assetOf({ wrapperFactory: factory.address, wrapper: wrapper.address, underlying: token.address, firstGigaIndex, lastGigaIndex });
+        assetId = hashAssetId(asset);
 
         aliceDeposit = { ownerHash: alice.ownerHash, sharedNonce: nonce(1001), assetId, amount: 400n };
         const preCommitmentHash = hashPreCommitment({
@@ -206,7 +191,8 @@ describe("ClaudeLilMessaging", async function () {
             circuitCompStorageHash: CIRCUIT_COMP_STORAGE_EMPTY_HASH,
         });
         const message = await encryptNote(aliceDeposit, alice.view.publicKey);
-        await send(warptoad.write.shieldErc20([wrapper.address, 400n, preCommitmentHash, message], { account: aliceWallet.account }));
+        const wrapperArgs = encodeWrapperArgs({ wrapper: wrapper.address, underlying: token.address });
+        await send(warptoad.write.shield([factory.address, preCommitmentHash, 400n, wrapperArgs, message], { account: aliceWallet.account }));
 
         assert.deepEqual((await tree()).leaves.slice(-1), [hashNote(aliceDeposit)]);
         assert.deepEqual(await getAllNotes(warptoad, publicClient, alice.view.privateKey, { fromBlock: scanFromBlock }), [
@@ -268,7 +254,7 @@ describe("ClaudeLilMessaging", async function () {
                 }),
                 actual_amount_recipient_commitments: 2,
                 spend_commitments: [
-                    spendInput(aliceDeposit, localProof, edgeIndex),
+                    spendInput(aliceDeposit, asset, localProof, edgeIndex),
                     fakeSpendInput(nonce(2005)),
                     fakeSpendInput(nonce(2006)),
                     fakeSpendInput(nonce(2007)),
@@ -299,14 +285,14 @@ describe("ClaudeLilMessaging", async function () {
         // a relayer swapping bob's message for garbage changes public_hash, which alice signed.
         // The generated verifier reverts with its own errors instead of returning false, so no VerificationFailed to match on
         const tampered = { ...tx, messages: [await fakeMessage(666n), ...messages.slice(1)] };
-        await assert.rejects(warptoad.write.verifyShieldedTx([tampered]));
+        await assert.rejects(warptoad.write.transactPrivate([tampered]));
         assert.deepEqual((await tree()).leaves.slice(-1), [hashNote(aliceDeposit)], "nothing got inserted");
 
-        await send(warptoad.write.verifyShieldedTx([tx]));
+        await send(warptoad.write.transactPrivate([tx]));
         assert.deepEqual((await tree()).leaves.slice(-5), [hashNote(aliceDeposit), ...recipientHashes]);
     });
 
-    it("3. bob and alice find their notes by scanning the Message events", async () => {
+    it("3. bob and alice find their notes by scanning the Message events, bob resolves the asset", async () => {
         const bobNotes = await getAllNotes(warptoad, publicClient, bob.view.privateKey, { fromBlock: scanFromBlock });
         assert.deepEqual(bobNotes, [{ ...bobNote, ...recipientDefaults() }]);
 
@@ -318,11 +304,21 @@ describe("ClaudeLilMessaging", async function () {
         // and what bob found is really a leaf he can spend from
         const localTree = await tree();
         assert.notEqual(localTree.indexOf(hashNote(bobNotes[0])), -1);
+
+        // all bob has is the assetId. The contracts hand back everything he needs to spend and unshield it
+        const resolved = await resolveAsset(warptoad, publicClient, bobNotes[0].assetId);
+        assert.deepEqual(resolved.asset, asset);
+        assert.equal(getAddress(resolved.wrapperFactory), getAddress(factory.address));
+        assert.equal(getAddress(resolved.wrapper), getAddress(wrapper.address));
+        assert.equal(getAddress(resolved.deployInfo.underlying), getAddress(token.address));
+        assert.equal(resolved.deployInfo.originGigaIndex, gigaIndex);
     });
 
     it("4. bob unshields his 300 into wrapped USDC and unwraps it", async () => {
         const localTree = await tree();
         const { proof: localProof, edgeIndex } = merkleProofInput(localTree, hashNote(bobNote));
+        // bob works from what step 3 resolved, not from alice's variables
+        const { asset: bobAsset, wrapperFactory, wrapper: bobWrapper, deployInfo } = await resolveAsset(warptoad, publicClient, bobNote.assetId);
 
         // an unshield is a recipient note whose owner hash is bob's eth address, unshields have to come first
         const bobAddress = bobWallet.account.address;
@@ -375,7 +371,7 @@ describe("ClaudeLilMessaging", async function () {
                 }),
                 actual_amount_recipient_commitments: 1,
                 spend_commitments: [
-                    spendInput(bobNote, localProof, edgeIndex),
+                    spendInput(bobNote, bobAsset, localProof, edgeIndex),
                     fakeSpendInput(nonce(3004)),
                     fakeSpendInput(nonce(3005)),
                     fakeSpendInput(nonce(3006)),
@@ -400,7 +396,9 @@ describe("ClaudeLilMessaging", async function () {
                 noUnshieldCommitment,
                 noUnshieldCommitment,
             ],
-            unshieldTargets: [{ wrapper: wrapper.address, id: 0n }, noTarget, noTarget, noTarget],
+            // the long form: what a wallet sends when it can't know whether the wrapper exists on the target chain yet.
+            // Here it does, so the factory only reads the first two fields
+            unshieldTargets: [{ wrapperFactory, wrapperArgs: encodeWrapperDeployArgs(bobWrapper, deployInfo) }, noTarget, noTarget, noTarget],
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages,
@@ -408,7 +406,7 @@ describe("ClaudeLilMessaging", async function () {
         };
 
         const wrappedBefore = await wrapper.read.balanceOf([bobAddress]);
-        await send(warptoad.write.verifyShieldedTx([tx]));
+        await send(warptoad.write.transactPrivate([tx]));
         assert.equal(await wrapper.read.balanceOf([bobAddress]), wrappedBefore + 300n, "bob got his wrapped USDC");
         // the unshield note stayed out of the tree, the 3 fakes went in
         const after = await tree();
@@ -417,7 +415,7 @@ describe("ClaudeLilMessaging", async function () {
 
         // and out of warptoad entirely
         const underlyingBefore = await token.read.balanceOf([bobAddress]);
-        await send(warptoad.write.unwrapERC20([wrapper.address, 300n, bobAddress], { account: bobWallet.account }));
+        await send(factory.write.unWrap([bobWrapper, 300n, bobAddress], { account: bobWallet.account }));
         assert.equal(await wrapper.read.balanceOf([bobAddress]), wrappedBefore, "wrapped USDC burned");
         assert.equal(await token.read.balanceOf([bobAddress]), underlyingBefore + 300n, "bob has real USDC");
     });

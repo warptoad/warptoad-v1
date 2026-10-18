@@ -128,6 +128,23 @@ export function hashPublic({ messagesHash, otherHash }: { messagesHash: bigint; 
     return poseidon2Hash([messagesHash, otherHash]);
 }
 
+/**
+ * `hash_asset_id`: Poseidon2([first_giga_index, last_giga_index, wrapper_id]), mirrored in `Warptoad.shield`.
+ * The range is the giga leaves the wrapper factory trusts, `wrapperId` is keccak31Byte(factory, wrapperAssetHash),
+ * see assets.ts. Spending a note needs this preimage, not just the hash
+ */
+export function hashAssetId({
+    firstGigaIndex,
+    lastGigaIndex,
+    wrapperId,
+}: {
+    firstGigaIndex: bigint;
+    lastGigaIndex: bigint;
+    wrapperId: bigint;
+}): bigint {
+    return poseidon2Hash([firstGigaIndex, lastGigaIndex, wrapperId]);
+}
+
 /** `hash_nullifier`: Poseidon2([nullifier_secret, giga_leaf_index, local_leaf_index]) */
 export function hashNullifier({
     nullifierSecret,

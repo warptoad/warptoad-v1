@@ -3,6 +3,15 @@ import type { WARPTOAD_CONTRACT_NAME } from "./config.js";
 import type { CircuitCompAuthSigInputs, CircuitCompStorage, CircuitSizeFields, PubKey } from "./hashing.js";
 
 export type WarptoadContract = ContractReturnType<typeof WARPTOAD_CONTRACT_NAME>;
+export type WrapperFactoryContract = ContractReturnType<"WrapperFactory">;
+export type WrapperERC20Contract = ContractReturnType<"WrapperERC20">;
+export type ChainConfigContract = ContractReturnType<"ChainConfig">;
+
+/**
+ * the preimage of a note's `assetId`, see `hashAssetId` in hashing.ts and assets.ts. A wallet needs it to spend,
+ * the blob only carries the hash. `resolveAsset` in assets.ts gets it back from the contracts
+ */
+export type Asset = { firstGigaIndex: bigint; lastGigaIndex: bigint; wrapperId: bigint };
 
 // ------ what a wallet keeps ------
 
@@ -32,6 +41,10 @@ export type CommitmentProofDataInput = {
     circuit_comp_storage: bigint[];
     asset_id: bigint;
     amount: bigint;
+    /** preimage of `asset_id`, the circuit checks the hash and that the spent leaf's giga index is in the range */
+    first_giga_index: bigint;
+    last_giga_index: bigint;
+    wrapper_id: bigint;
 };
 
 export type CommitmentSpendProofInput = {
@@ -57,8 +70,6 @@ export type PubRootsAndIndexesInput = {
     local_edge_index: bigint;
     giga_root: bigint;
     giga_edge_index: bigint;
-    giga_first_valid_index: bigint;
-    giga_last_valid_index: bigint;
     current_giga_index: bigint;
 };
 

@@ -23,6 +23,7 @@ import {
     type CircuitCompStorage,
 } from "./hashing.js";
 import type {
+    Asset,
     AuthInputs,
     CircuitInputs,
     CommitmentRecipientDataInput,
@@ -166,9 +167,14 @@ export function recipientInput(n: Note, circuitCompInput: bigint[] = zeros(CIRCU
     };
 }
 
-/** a spend slot of the circuit. `gigaProof` stays empty for a spend on the note's own chain. Fakes only need a nonce */
+/**
+ * a spend slot of the circuit. `asset` is the preimage of `n.assetId`, see assets.ts: the circuit checks it hashes
+ * to the note's asset_id and that the leaf's giga index is inside its range. `gigaProof` stays empty for a spend on
+ * the note's own chain. Fakes only need a nonce
+ */
 export function spendInput(
     n: Note,
+    asset: Asset,
     localProof: MerkleProofInput,
     localEdgeIndex: bigint,
     gigaProof: MerkleProofInput = emptyProof(),
@@ -180,6 +186,9 @@ export function spendInput(
             circuit_comp_storage: [...storageOf(n)],
             asset_id: n.assetId,
             amount: n.amount,
+            first_giga_index: asset.firstGigaIndex,
+            last_giga_index: asset.lastGigaIndex,
+            wrapper_id: asset.wrapperId,
         },
         local_proof: localProof,
         giga_proof: gigaProof,
@@ -192,9 +201,12 @@ export function fakeNote(nonce: bigint): Note {
     return { ownerHash: 0n, sharedNonce: nonce, assetId: 0n, amount: 0n };
 }
 
+/** the asset of a fake slot, never checked by the circuit */
+export const FAKE_ASSET: Asset = { firstGigaIndex: 0n, lastGigaIndex: 0n, wrapperId: 0n };
+
 /** a spend slot that is not a spend. Pairs with `hashFakeNullifier(nonce)` */
 export function fakeSpendInput(nonce: bigint): CommitmentSpendProofInput {
-    return spendInput(fakeNote(nonce), emptyProof(), 0n);
+    return spendInput(fakeNote(nonce), FAKE_ASSET, emptyProof(), 0n);
 }
 
 /** join_split doesn't use the auth signature, so it stays all zeros and the circuit skips it */
@@ -219,8 +231,8 @@ export function unshieldInput(recipient: Address, assetId: bigint, amount: bigin
 }
 
 /**
- * the root part of the public inputs. TODO giga: takes the giga root, its edge index and the contract's
- * valid index range once the giga tree is plugged in. All 0 means "local spends only"
+ * the root part of the public inputs. TODO giga: takes the giga root and its edge index once the giga tree is
+ * plugged in. Both 0 means "local spends only", the contract rejects anything else for now
  */
 export function pubRoots(localRoot: bigint, localEdgeIndex: bigint, currentGigaIndex: bigint): PubRootsAndIndexesInput {
     return {
@@ -228,8 +240,6 @@ export function pubRoots(localRoot: bigint, localEdgeIndex: bigint, currentGigaI
         local_edge_index: localEdgeIndex,
         giga_root: 0n,
         giga_edge_index: 0n,
-        giga_first_valid_index: 0n,
-        giga_last_valid_index: 0n,
         current_giga_index: currentGigaIndex,
     };
 }

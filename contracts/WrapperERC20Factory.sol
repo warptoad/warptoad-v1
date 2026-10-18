@@ -54,8 +54,11 @@ contract WrapperFactory is IWrapperFactory, ReentrancyGuard {
         uint8 decimals;
     }
     // added gigaIndex because technically token can be deployed to the same address on multiple chains
-    mapping(address underlying => mapping(uint64 gigaIndex => address wrapper)) wrappers;
-    mapping(address wrapper => Underlying underlying) underlyings;
+    /// @notice the wrapper of `underlying` as wrapped on chain `gigaIndex`: this chain's for tokens wrapped here,
+    /// another chain's for wrappers a bridged unshield deployed here
+    mapping(address underlying => mapping(uint64 gigaIndex => address wrapper)) public wrappers;
+    /// @notice what a wrapper redeems for and on which chain, zero for anything this factory did not deploy
+    mapping(address wrapper => Underlying underlying) public underlyings;
     /// @notice inverse of `_hashAssetArgs`, written once per deployed wrapper. Lets a wallet go from the
     /// `wrapperAssetHash` in `Warptoad.assetSources` to the wrapper, and from there to everything else by view calls
     mapping(uint256 wrapperAssetHash => address wrapper) public wrapperOf;
