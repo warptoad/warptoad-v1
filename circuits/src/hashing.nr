@@ -13,22 +13,25 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  *   # during shield/unshield. But not during shielded tx   /                   giga_leaf       other_giga_leaves
  *                                                   |     |                   /    |     \
  *                                                   |     |  ---local_root---   local_   GIGA_LEAF_DOMAIN <- # without this you can confuse with a internal node
- *            # Who owns it + what controls it       |     |/       \             edge_index               \
- *                                |               commitment        otherLeafs..      |                     \
- * to refer to recipient          |              /     |    \                         |             # needed to verify leaf_index since we need it for the nullifier
- * without knowing                |             /      |     \
- * their chain or pubKey       pre_commitment_hash  asset_id  amount <- erc20=amount,721=1, 1155=amount of that nft id     
- *         \                  /   |      \       \        \       
- *        ----owner_hash------  shared_  CIRCUIT_ \       poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )
- *        / |       |        \   nonce   CONTRACT  \                                                \ 
- *       / /        |         \      |               circuit_component_storage_hash                 erc20=keccak(wrapperFactoryAddr,_wrapperAssetHash)        
- *  spending  dest_giga_index  \   to blind commit                            |                                                         |
- *   PubKey                     \                                             |                                                       keccak(wrapperAddr,underlyingAddr)
+ *            # Who owns it + what controls it       |     |/       \             edge_index              \
+ *                                |               commitment        otherLeafs..         |                 \
+ * to refer to recipient          |              /     |    \                             # needed to verify leaf_index since we need it for the nullifier
+ * without knowing                |             /  asset_id  amount
+ * their chain or pubKey       pre_commitment_hash         \                                
+ *         \                  /   |      \       \          \                            
+ *        ----owner_hash------  shared_  CIRCUIT_ \   wraptoad.sol -> poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )
+ *        / |       |        \   nonce   CONTRACT  \                                                      \ 
+ *       / /        |         \      |              circuit_component_storage_hash        wraptoad.sol -> keccak(wrapperFactoryAddr,_wrapperAssetHash)        
+ *  spending  dest_giga_index  \   to blind commit                            |                                                                    |
+ *   PubKey                     \                                             |                                       wrapperfactory.sol -> erc20=keccak(wrapperAddr,underlyingAddr), erc721=keccak(wrapperAddr,underlyingAddr, id)
  *   X and y                   nullifier_secret                           # ex in join_split: pre_nullifier,  
  *                                   |                                    # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
  *                                   |                                    #   // taker_timer_start_pre_nullifier is to ensure, h(take_timer_pre_null, taker_null_secret) is not seen
  *                                   |                                    #   // basically it checks. Taker you better not start ur unlock timer while closing this trade. Or worse timer is already over and funds gone!
- *                                   |                                    # deferred_inclusion: pre_nullifier, deferred_root      
+ *                                   |                                    # deferred_inclusion: pre_nullifier, deferred_root  
+ *                                   |                                    # WARNING note that anyone shielding can put anything they want into pre_commitment_hash, thus also circuit_component_storage_hash
+ *                                   |                                    # SO DO NOT TRACK THINGS LIKE AMOUNTS IN THERE
+ *                                   |                                    # TODO maybe these are inputs not storage?
  *                       # derived from viewingKey (or somewhere else?)                                         
  *                       # re-used! nullifier(nullifier_secret, giga_index, leaf_index)    
  *                       # TODO if tree resets, so does index: but at that point a attack would need 

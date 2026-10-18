@@ -77,10 +77,10 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             );
             assert(spend_commitment.commitment.asset_id == hashed_asset_id, "incorrect asset_id");
             // this handles the fact that giga tree is now permissionless
-            // this blocks bad actors exploiting a infinite mint bug, where the could just make a new giga_leaf
-            // and put anything they want in there. Like asset_id of warptoadETH, the set the amount to way too much! :0
+            // this blocks bad actors exploiting a infinite mint bug, where they could just make a new giga_leaf
+            // and put anything they want in there. Like asset_id of warptoadETH and then set the amount to way too much! :0
             // They can still do that, but the circuit will never treat it as spendable since that asset_id also needs
-            // the giga index range set by the wrapper factory. 
+            // the giga index range set by the wrapper factory.
             // And the wrapper factory only trust it's own range of indexes. Where only wrapperFactory can update the leaf
 
             // this checks if proof is on same chain, in which case we skip giga_root checks
@@ -325,7 +325,7 @@ fn main(
         );
     }
     //
-    //  @WARNING: the contract_circuits below need to at least verify 3 things:
+    //  @WARNING: the contract_circuits below needs to at least verify 3 things:
     //      -every root in `spend_commitments_and_roots`, all contain valid roots
     //      -signer, in `signer_owner_secrets` is allowed to nullify and spend these commitment
     //          ex in join_split, because they are in that commitments
@@ -473,15 +473,22 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
         let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
         let mut recipient_commitment_hash: Field = 0x00;
         if (index < inputs.actual_amount_recipient_commitments) {
-            let mut recipient_storage_hash: Field = CIRCUIT_COMP_STORAGE_EMPTY_HASH;
-            if (recipient_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
-                recipient_storage_hash = hash_join_split_inputs(inputs)
-            } else {
-                assert(
-                    false,
-                    "unknown circuit_comp_selector in recipient_commitments when trying to call a circuit component",
-                );
-            };
+            let recipient_circuit_comp_storage_hash: Field =
+                hash_circuit_component_storage(recipient_commitment.circuit_comp_input);
+
+            // This customizable check is dropped, when ever someone does shield() in warptoad.sol
+            // They can put anything they want into pre_commitment_hash, including the storage hash
+            // So checking these inputs here is useless if it can be bypassed anyway
+            // We just need to assume anything can appear into storage like that and rely on asset_id and amount
+            // For accounting / solvency
+            // if (recipient_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
+            //     recipient_storage_hash = hash_join_split_inputs(inputs)
+            // } else {
+            //     assert(
+            //         false,
+            //         "unknown circuit_comp_selector in recipient_commitments when trying to call a circuit component",
+            //     );
+            // };
             assert(
                 expected_asset_id == recipient_commitment.asset_id,
                 "recipient_commitments does not contain all same assetIds",
@@ -501,7 +508,7 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
                 recipient_commitment.owner_hash,
                 recipient_commitment.shared_nonce,
                 recipient_commitment.circuit_comp_selector,
-                recipient_storage_hash,
+                recipient_circuit_comp_storage_hash,
             );
             recipient_commitment_hash = hash_commitment(
                 pre_commitment_hash,
