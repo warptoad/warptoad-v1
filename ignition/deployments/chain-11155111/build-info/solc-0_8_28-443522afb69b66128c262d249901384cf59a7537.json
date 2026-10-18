@@ -1,0 +1,52 @@
+{
+  "_format": "hh3-sol-build-info-1",
+  "id": "solc-0_8_28-443522afb69b66128c262d249901384cf59a7537",
+  "solcVersion": "0.8.28",
+  "solcLongVersion": "0.8.28+commit.7893614a",
+  "compilerType": "solc",
+  "toolVersions": {
+    "hardhat": "3.14.0"
+  },
+  "userSourceNameMap": {
+    "contracts/ChainConfig.sol": "project/contracts/ChainConfig.sol"
+  },
+  "input": {
+    "language": "Solidity",
+    "settings": {
+      "evmVersion": "cancun",
+      "optimizer": {
+        "enabled": true,
+        "runs": 200
+      },
+      "outputSelection": {
+        "*": {
+          "": [
+            "ast"
+          ],
+          "*": [
+            "abi",
+            "evm.bytecode.linkReferences",
+            "evm.bytecode.object",
+            "evm.bytecode.opcodes",
+            "evm.bytecode.sourceMap",
+            "evm.deployedBytecode.immutableReferences",
+            "evm.deployedBytecode.linkReferences",
+            "evm.deployedBytecode.object",
+            "evm.deployedBytecode.opcodes",
+            "evm.deployedBytecode.sourceMap",
+            "evm.methodIdentifiers"
+          ]
+        }
+      },
+      "remappings": []
+    },
+    "sources": {
+      "project/contracts/ChainConfig.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.28;\n\nimport {IChainConfig, ChainInfo} from \"./interfaces/IChainConfig.sol\";\n\n/**\n * @title ChainConfig\n * @notice chainId => ChainInfo lookup, read by Warptoad and the wrapper factories in their constructors so none of\n * them need chain specific constructor args. That keeps their init code identical on every chain, which is what\n * lets CREATE2 put them on the same address everywhere.\n * @dev deploy this with CREATE2 and the exact same table on every chain, otherwise its own address differs and\n * everything downstream does too. The table is provided by the constructor, see `chainConfigArgs` in src/config.ts.\n * A chain missing from the table makes `info()` revert, so a deploy on an unlisted chain fails loudly instead of\n * silently getting gigaIndex 0\n */\ncontract ChainConfig is IChainConfig {\n    mapping(uint256 chainId => ChainInfo) private infos;\n\n    error LengthMismatch(uint256 chainIds, uint256 infos);\n    error EmptyChainName(uint256 chainId);\n    error DuplicateChainId(uint256 chainId);\n    error UnknownChain(uint256 chainId);\n\n    constructor(uint256[] memory _chainIds, ChainInfo[] memory _infos) {\n        if (_chainIds.length != _infos.length)\n            revert LengthMismatch(_chainIds.length, _infos.length);\n        for (uint256 i = 0; i < _chainIds.length; i++) {\n            // an empty name doubles as the \"unknown\" sentinel in `info`\n            if (bytes(_infos[i].chainName).length == 0)\n                revert EmptyChainName(_chainIds[i]);\n            if (bytes(infos[_chainIds[i]].chainName).length != 0)\n                revert DuplicateChainId(_chainIds[i]);\n            infos[_chainIds[i]] = _infos[i];\n        }\n    }\n\n    function info() public view returns (ChainInfo memory) {\n        ChainInfo memory _info = infos[block.chainid];\n        if (bytes(_info.chainName).length == 0)\n            revert UnknownChain(block.chainid);\n        return _info;\n    }\n\n    function gigaIndex() external view returns (uint64) {\n        return info().gigaIndex;\n    }\n\n    /// @notice the entry for any chain, for off-chain tooling. Reverts on an unknown chain\n    function infoOf(uint256 _chainId) external view returns (ChainInfo memory) {\n        ChainInfo memory _info = infos[_chainId];\n        if (bytes(_info.chainName).length == 0) revert UnknownChain(_chainId);\n        return _info;\n    }\n}\n"
+      },
+      "project/contracts/interfaces/IChainConfig.sol": {
+        "content": "// SPDX-License-Identifier: MIT\npragma solidity ^0.8.28;\n\n/// @dev everything about a chain that Warptoad and the wrapper factories need to know about themselves\nstruct ChainInfo {\n    uint64 gigaIndex; // leaf index of this chain in the giga tree\n    string chainSymbol; // ex \"eth\", ends up in wrapper symbols: wtUSDC@eth\n    string chainName; // ex \"Ethereum\", ends up in wrapper names: Wrapped Warptoad USD Coin Ethereum\n}\n\ninterface IChainConfig {\n    /// @notice the entry for `block.chainid`, reverts on an unknown chain\n    function info() external view returns (ChainInfo memory);\n\n    /// @notice `info().gigaIndex`\n    function gigaIndex() external view returns (uint64);\n}\n"
+      }
+    }
+  }
+}

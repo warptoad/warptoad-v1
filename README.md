@@ -40,7 +40,7 @@ pnpm deploy:sepolia   # ignition deploy + etherscan verify
 Constructor args are in: `ignition/parameters/sepolia.json`. 
 For other chains you need to copy paste from: `src/config.ts`, this is a limitation of hardhat ignition
 
-Wrapper tokens are deployed by `Warptoad` itself on first wrap, so they might not be automatically
+Wrapper tokens are deployed by `WrapperFactory` on first wrap, so they might not be automatically
 verified. In case you need one verified do:
 
 ```sh
@@ -105,6 +105,8 @@ rm -rf ~/.aztec
 
 # deployments
 
-warptoad: [0xC595711faa9D84D59D7904dbE8890c5b6662156F](https://sepolia.etherscan.io/address/
-0xC595711faa9D84D59D7904dbE8890c5b6662156F)  
-verifier: [0x42768e1c3825dFF528A44CAC479c9900Dc344a3b](https://sepolia.etherscan.io/address/0x42768e1c3825dFF528A44CAC479c9900Dc344a3b)
+warptoad: [0x49A549C7aC6A79567240e39870B509005d18b5b6](https://sepolia.etherscan.io/address/0x49A549C7aC6A79567240e39870B509005d18b5b6)  
+wrapperFactory: [0x1aa30A44d55ff4126F9d316e8d2E91BF8202fC3A](https://sepolia.etherscan.io/address/0x1aa30A44d55ff4126F9d316e8d2E91BF8202fC3A)  
+verifier: [0x372324B18395C52995E93Baf9592EC7910A92436](https://sepolia.etherscan.io/address/0x372324B18395C52995E93Baf9592EC7910A92436)  
+chainConfig: [0x8E0EDF630b3E51d97f21A526d778c5A075D86afc](https://sepolia.etherscan.io/address/0x8E0EDF630b3E51d97f21A526d778c5A075D86afc)  
+skinnyIMTPoseidon2WriteStorage: [0x00000066C760D24272a9E8A424EF7233A0F0da83](https://sepolia.etherscan.io/address/0x00000066C760D24272a9E8A424EF7233A0F0da83)

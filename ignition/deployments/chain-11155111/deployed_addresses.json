@@ -1,5 +1,7 @@
 {
   "Warptoad#SkinnyIMTPoseidon2WriteStorage": "0x00000066C760D24272a9E8A424EF7233A0F0da83",
-  "Warptoad#WarptoadVerifier": "0x42768e1c3825dFF528A44CAC479c9900Dc344a3b",
-  "Warptoad#Warptoad": "0xC595711faa9D84D59D7904dbE8890c5b6662156F"
+  "Warptoad#ChainConfig": "0x8E0EDF630b3E51d97f21A526d778c5A075D86afc",
+  "Warptoad#WarptoadVerifier": "0x372324B18395C52995E93Baf9592EC7910A92436",
+  "Warptoad#Warptoad": "0x49A549C7aC6A79567240e39870B509005d18b5b6",
+  "Warptoad#WrapperFactory": "0x1aa30A44d55ff4126F9d316e8d2E91BF8202fC3A"
 }
