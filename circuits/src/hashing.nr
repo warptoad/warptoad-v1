@@ -4,6 +4,8 @@ use crate::constants::{
 };
 use crate::{ProvenCommitment, PubKey};
 use poseidon::poseidon2::{Poseidon2};
+use super::constants::TOAD_SWAP_SELECTOR;
+
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
 
 /**                                                            # sender needs to share everything in commitment + preCommitmentHash, so: [shared_nonce, CIRCUIT_COMPONENT, asset_id, amount]. maybe also share inputs of asset_id idk. We could store that one time onchain so the encrypted blob wont be huge. owner knows owner_hash inputs, he is literally him

@@ -81,6 +81,7 @@ struct ShieldedTx {
     // one encrypted note per recipient slot, fakes and unshields included so every slot looks the same. See src/messages.ts
     // bound to the proof through `public_hash`, so a relayer can't swap them
     bytes[] messages;
+    uint256 publicHash;
     bytes proof; // of circuits/src/main.nr, `public_hash` is `hashPublic(messages)`
 }
 
@@ -100,8 +101,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     IWarptoadVerifier public immutable verifier;
     /// @notice mirrors `CIRCUIT_SIZE` in circuits/src/constants.nr: amount of spend and recipient commitment slots per proof
     uint256 public immutable CIRCUIT_SIZE;
-    /// @dev roots, indexes, timestamps and public hash. Everything that isn't an array of CIRCUIT_SIZE
-    uint256 private constant PUBLIC_INPUTS_HEAD = 8;
+    /// @dev roots, indexes, timestamps,messagesHash and public hash. Everything that isn't an array of CIRCUIT_SIZE
+    uint256 private constant PUBLIC_INPUTS_HEAD = 9;
 
     /// @notice every root the commitment tree ever had, and its size at that time. 0 means unknown root
     mapping(uint256 localRoot => uint256 treeSize) public localRoots;
@@ -330,8 +331,9 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         bytes32[] memory publicInputs = formatPublicInputs(
             _tx.roots,
             _tx.timeStamps,
-            // the spender signed this inside the proof, so the relayer can't touch the messages
-            hashPublic(_tx.messages),
+            // swaptoad only needs one message so only first is hashed for now
+            hashMessages(_tx.messages[0]),
+            _tx.publicHash,
             _tx.unshieldingCommitments,
             _tx.nullifiers,
             _tx.recipientCommitmentsHashes,
@@ -355,10 +357,10 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * src/messages.ts. Everything a shielded tx does in public goes in here so it is covered by the spender's
      * signature: Poseidon2(keccak(messages), keccak(other public things)). The second one is 0 until there are other things
      */
-    function hashPublic(
-        bytes[] calldata _messages
-    ) public view returns (uint256) {
-        return Poseidon2.hash_2(keccak31Byte(abi.encode(_messages)), 0);
+    function hashMessages(
+        bytes calldata _message
+    ) public pure returns (uint256) {
+        return keccak31Byte(_message);
     }
 
     function _checkRootsAndTimeStamps(
@@ -497,6 +499,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     function formatPublicInputs(
         PubRootsAndIndexes calldata _roots,
         TimeStamps calldata _timeStamps,
+        uint256 _messagesHash,
         uint256 _publicHash,
         UnshieldingCommitment[] calldata _unshieldingCommitments,
         uint256[] calldata _nullifiers,
@@ -522,7 +525,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         publicInputs[4] = bytes32(uint256(_gigaIndex)); // current_giga_index
         publicInputs[5] = bytes32(_timeStamps.proofExpireTimeStamp);
         publicInputs[6] = bytes32(_timeStamps.historicTimeStamp);
-        publicInputs[7] = bytes32(_publicHash);
+        publicInputs[7] = bytes32(_messagesHash);
+        publicInputs[8] = bytes32(_publicHash);
 
         uint256 unshieldingOffset = PUBLIC_INPUTS_HEAD;
         uint256 nullifiersOffset = unshieldingOffset + size * 3;

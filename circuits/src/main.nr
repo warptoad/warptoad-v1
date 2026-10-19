@@ -12,7 +12,7 @@ use crate::hashing::{
 
 use crate::constants::{
     CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_COMP_STORAGE_SIZE,
-    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH,
+    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH, TOAD_SWAP_SELECTOR,
 };
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
@@ -41,7 +41,6 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
     local_root: Field,
     local_edge_index: Field,
     giga_edge_index: Field,
-    owner_hash: Field,
     current_giga_index: Field,
     actual_amount_spend_commitments: u32,
 ) -> [ProvenCommitment; SIZE] {
@@ -52,7 +51,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             proven_commitments[index].circuit_comp_storage_hash =
                 hash_circuit_component_storage(spend_commitment.commitment.circuit_comp_storage);
             let pre_commitment_hash: Field = hash_pre_commitment(
-                owner_hash,
+                spend_commitment.commitment.owner_hash,
                 spend_commitment.commitment.shared_nonce,
                 spend_commitment.commitment.circuit_comp_selector,
                 proven_commitments[index].circuit_comp_storage_hash,
@@ -146,6 +145,7 @@ fn greater_or_equal(a: Field, b: Field) -> bool {
 }
 
 struct CommitmentProofData {
+    owner_hash: Field,
     shared_nonce: Field,
     circuit_comp_selector: Field,
     circuit_comp_storage: [Field; CIRCUIT_COMP_STORAGE_SIZE],
@@ -166,6 +166,7 @@ struct CommitmentRecipientData {
 }
 
 pub struct ProvenCommitment {
+    owner_hash: Field,
     local_root: Field,
     giga_root: Field,
     circuit_comp_selector: Field,
@@ -223,7 +224,8 @@ pub struct TimeStamps {
 pub struct PubInputs<let SIZE: u32> {
     roots: PubRootsAndIndexes,
     time_stamps: TimeStamps,
-    public_hash: Field, // anything done in public is in here, encrypted blobs, contract calls, etc, attached to spenders signature and constrained to proof shared to relayer
+    public_hash: Field,
+    first_message_hash: Field,
     unshielding_commitments: [UnshieldingCommitment; SIZE],
     nullifiers: [Field; SIZE], // to make `spend_commitments` un spendable
     recipient_commitments_hashes: [Field; SIZE],
@@ -241,14 +243,13 @@ pub struct AuthInputs<let AUTH_HASH_SIZE: u32> {
     inputs: [Field; AUTH_HASH_SIZE],
 }
 
-/// see hash_public. `messages_hash` is here so a circuit component can constrain what the sender put in the messages
+/// see hash_public. `first_message_hash` is here so a circuit component can constrain what the sender put in the messages
 pub struct PublicHashPreimage {
-    messages_hash: Field,
+    first_message_hash: Field,
     other_hash: Field,
 }
 
 pub struct PrivInputs<let DEPTH: u32, let SIZE: u32, let AUTH_HASH_SIZE: u32> {
-    public_hash_preimage: PublicHashPreimage,
     recipient_commitments: [CommitmentRecipientData; SIZE],
     actual_amount_recipient_commitments: u32,
     // proof
@@ -280,15 +281,6 @@ fn main(
         pub_in.roots.current_giga_index,
         priv_in.owner.nullifier_secret,
     );
-    // the contract builds public_hash the same way, see Warptoad.hashPublic. Only the structure is checked for now
-    assert(
-        hash_public(
-            priv_in.public_hash_preimage.messages_hash,
-            priv_in.public_hash_preimage.other_hash,
-        )
-            == pub_in.public_hash,
-        "public_hash does not match its preimage",
-    );
     // @warning: THESE COMMITMENTS ARE NOT VERIFIED, only that commitment+proof = root, but THAT ROOT CAN BE INVALID
     // the `circuit_component` functions below should check if those roots are valid!
     let spend_commitments_and_roots: [ProvenCommitment; CIRCUIT_SIZE] =
@@ -298,7 +290,6 @@ fn main(
             pub_in.roots.local_root,
             pub_in.roots.local_edge_index,
             pub_in.roots.giga_edge_index,
-            owner_hash,
             pub_in.roots.current_giga_index,
             priv_in.actual_amount_spend_commitments,
         );
@@ -336,30 +327,31 @@ fn main(
     //
 
     // first one pick what to spend from
+    let circuit_comp_inputs: CircuitCompInputs<CIRCUIT_SIZE> = CircuitCompInputs {
+        local_root: pub_in.roots.local_root,
+        giga_root: pub_in.roots.giga_root,
+        proof_expire_time_stamp: pub_in.time_stamps.proof_expire_time_stamp,
+        historic_time_stamp: pub_in.time_stamps.historic_time_stamp,
+        first_message_hash: pub_in.first_message_hash,
+        public_hash: pub_in.public_hash,
+        unshielding_commitments: pub_in.unshielding_commitments,
+        nullifiers: pub_in.nullifiers,
+        recipient_commitments_hashes: pub_in.recipient_commitments_hashes,
+        recipient_commitments: priv_in.recipient_commitments,
+        actual_amount_recipient_commitments: priv_in.actual_amount_recipient_commitments,
+        spend_commitments_and_roots: spend_commitments_and_roots,
+        actual_amount_spend_commitments: priv_in.actual_amount_spend_commitments,
+        nullifier_secret: priv_in.owner.nullifier_secret,
+        auth_sig_inputs: priv_in.auth.inputs,
+        auth_sig_pubkey: priv_in.auth.pub_key,
+        owner_hash,
+    };
 
     if (priv_in.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
         // TODO nullifier = h(nullifier_secret, giga_index, local_index)
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
         // just add a nullifier slot number
-        join_split(
-            CircuitCompInputs {
-                local_root: pub_in.roots.local_root,
-                giga_root: pub_in.roots.giga_root,
-                proof_expire_time_stamp: pub_in.time_stamps.proof_expire_time_stamp,
-                historic_time_stamp: pub_in.time_stamps.historic_time_stamp,
-                public_hash: pub_in.public_hash,
-                unshielding_commitments: pub_in.unshielding_commitments,
-                nullifiers: pub_in.nullifiers,
-                recipient_commitments_hashes: pub_in.recipient_commitments_hashes,
-                recipient_commitments: priv_in.recipient_commitments,
-                actual_amount_recipient_commitments: priv_in.actual_amount_recipient_commitments,
-                spend_commitments_and_roots: spend_commitments_and_roots,
-                actual_amount_spend_commitments: priv_in.actual_amount_spend_commitments,
-                nullifier_secret: priv_in.owner.nullifier_secret,
-                auth_sig_inputs: priv_in.auth.inputs,
-                owner_hash,
-            },
-        )
+        join_split(circuit_comp_inputs);
     } else {
         assert(false, "unknown signed_data.circuit_component_selector");
     }
@@ -406,6 +398,7 @@ pub struct CircuitCompInputs<let SIZE: u32> {
     proof_expire_time_stamp: Field,
     historic_time_stamp: Field,
     unshielding_commitments: [UnshieldingCommitment; SIZE],
+    first_message_hash: Field,
     public_hash: Field, // here you can constrain what is done in public
     nullifiers: [Field; SIZE],
     recipient_commitments_hashes: [Field; SIZE],
@@ -415,12 +408,119 @@ pub struct CircuitCompInputs<let SIZE: u32> {
     actual_amount_spend_commitments: u32,
     nullifier_secret: Field,
     auth_sig_inputs: [Field; CIRCUIT_COMP_AUTH_SIZE],
+    auth_sig_pubkey: PubKey,
     owner_hash: Field,
 }
 
-// this guy has no inputs!
-fn hash_join_split_inputs<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> Field {
-    CIRCUIT_COMP_STORAGE_EMPTY_HASH
+pub struct SwapToadOrder {
+    maker_asset_id: Field,
+    maker_amount: Field,
+    taker_asset_id: Field,
+    taker_amount: Field,
+    expiry: Field,
+    first_message_hash: Field,
+}
+
+pub struct SwapToadStorage {
+    auth: PubKey,
+    shared_nullifier_secret: Field,
+}
+
+// @notice: maker locks tokens into a toad_swap lock by creating commitments with circuit_comp_selector set to TOAD_SWAP_SELECTOR
+// and **any** value they want into circuit_comp_storage_hash!
+// this function is ran to proof a toad_swap is filled
+fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
+    let locked_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[0];
+    // check root
+    if (locked_commitment.giga_root == 0x00) {
+        assert(
+            locked_commitment.local_root == inputs.local_root,
+            "spend was local only but does not match local_root from public inputs",
+        );
+    } else {
+        assert(
+            locked_commitment.giga_root == inputs.giga_root,
+            "spend was *not* local and does not match giga_root from public inputs",
+        );
+    }
+    // check selector
+    assert(
+        locked_commitment.circuit_comp_selector == TOAD_SWAP_SELECTOR,
+        "Commitment being spend needs it's circuit_comp_selector to be set to TOAD_SWAP_SELECTOR",
+    );
+
+    // TODO document first slot is pubkey of signer of the order
+    let lock_storage: SwapToadStorage = SwapToadStorage {
+        auth: PubKey {
+            x: locked_commitment.circuit_comp_storage[0],
+            y: locked_commitment.circuit_comp_storage[1],
+        },
+        shared_nullifier_secret: locked_commitment.circuit_comp_storage[2],
+    };
+    let shared_nullifier: Field = hash_nullifier(
+        lock_storage.shared_nullifier_secret,
+        locked_commitment.giga_leaf_index,
+        locked_commitment.local_leaf_index,
+    );
+    assert(
+        inputs.nullifiers[0] == shared_nullifier,
+        "First nullifier needs to be hashed from the shared nullifier from circuit_comp_storage",
+    );
+    if (inputs.auth_sig_pubkey.x == 0x00) {
+        // auth_sig_inputs set to zero? okay no signature was provided in private inputs of circuit.
+        // that means that owner of the commitment want to cancel
+        // they just want their money back so let's no ask them to verify their own signature and complete a trade
+        // with them selfs!
+    } else {
+        let signed_order: SwapToadOrder = SwapToadOrder {
+            maker_asset_id: inputs.auth_sig_inputs[0],
+            maker_amount: inputs.auth_sig_inputs[1],
+            taker_asset_id: inputs.auth_sig_inputs[2],
+            taker_amount: inputs.auth_sig_inputs[3],
+            expiry: inputs.auth_sig_inputs[4],
+            first_message_hash: inputs.auth_sig_inputs[5]
+        };
+        assert(
+            inputs.first_message_hash == signed_order.first_message_hash,
+            "first_message_hash does not match makers required first_message_hash from auth_sig_inputs",
+        );
+        // check auth sig actually belongs to that in the locked commitment storage
+        assert(
+            lock_storage.auth == inputs.auth_sig_pubkey,
+            "auth_pub_key.x does match the auth_pub_key_x from circuit_comp_storage in the locked_commitment",
+        );
+        // TODO can we join_split before settle?
+        let maker_change_commit: CommitmentRecipientData = inputs.recipient_commitments[0];
+        let taker_change_commit: CommitmentRecipientData = inputs.recipient_commitments[1];
+        let maker_new_commit: CommitmentRecipientData = inputs.recipient_commitments[2];
+        let taker_new_commit: CommitmentRecipientData = inputs.recipient_commitments[3];
+
+        // only one asset_id
+        // don't get it mixed up!
+        // maker sells asset_A for asset_B
+        // if anything left over gets asset_A as change and asset_B as new commitment
+        assert(
+            maker_change_commit.asset_id == signed_order.maker_asset_id,
+            "maker_change_commit asset_id mismatch with asset_id in signed_order.maker_asset_id."
+        );
+        assert(
+            taker_change_commit.asset_id == signed_order.taker_asset_id,
+            "taker_change_commit asset_id mismatch with asset_id in signed_order.taker_asset_id",
+        );
+        assert(
+            maker_new_commit.asset_id == signed_order.taker_asset_id,
+            "maker_new_commit asset_id mismatch with asset_id in signed_order.taker_asset_id",
+        );
+        assert(
+            taker_new_commit.asset_id == signed_order.maker_asset_id,
+            "taker_new_commit asset_id mismatch with asset_id in signed_order.maker_asset_id",
+        );
+
+        assert(
+            maker_change_commit.owner_hash == locked_commitment.owner_hash,
+            "owner_hash needs to stay same for the maker_change_commit as the locked_commitment",
+        );
+    }
 }
 
 // TODO dummy nullifiers and commitment_hashes
@@ -446,6 +546,11 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
                     "spend was *not* local and does not match giga_root from public inputs",
                 );
             }
+            // owner
+            assert(
+                spend_commitment.owner_hash == inputs.owner_hash,
+                "Every spend commitment in join_split needs to have the owner_hash from the owner signature",
+            );
             // other checks
             assert(
                 spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
@@ -507,6 +612,7 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             let pre_commitment_hash: Field = hash_pre_commitment(
                 recipient_commitment.owner_hash,
                 recipient_commitment.shared_nonce,
+                // notice: circuit_comp selector/storage can be set to anything here
                 recipient_commitment.circuit_comp_selector,
                 recipient_circuit_comp_storage_hash,
             );
