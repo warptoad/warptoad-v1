@@ -127,3 +127,7 @@ pub fn hash_fake_commitment(nonce: Field) -> Field {
 pub fn hash_asset_id(first_giga_index: Field, last_giga_index: Field, wrapper_id: Field) -> Field {
     Poseidon2::hash([first_giga_index, last_giga_index, wrapper_id], 3)
 }
+
+pub fn hash_shared_nonce_swaptoad(shared_nullifier_secret: Field, commitment_type:Field) -> Field {
+    Poseidon2::hash([shared_nullifier_secret, commitment_type], 2)
+}

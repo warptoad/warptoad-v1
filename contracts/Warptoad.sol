@@ -331,8 +331,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         bytes32[] memory publicInputs = formatPublicInputs(
             _tx.roots,
             _tx.timeStamps,
-            // swaptoad only needs one message so only first is hashed for now
-            hashMessages(_tx.messages[0]),
+            // swaptoad only needs the first 2 message 
+            hashMessages(_tx.messages[0],_tx.messages[1]),
             _tx.publicHash,
             _tx.unshieldingCommitments,
             _tx.nullifiers,
@@ -358,9 +358,10 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * signature: Poseidon2(keccak(messages), keccak(other public things)). The second one is 0 until there are other things
      */
     function hashMessages(
-        bytes calldata _message
+        bytes calldata _message1,
+        bytes calldata _message2
     ) public pure returns (uint256) {
-        return keccak31Byte(_message);
+        return keccak31Byte(abi.encode(_message1, _message2));
     }
 
     function _checkRootsAndTimeStamps(
