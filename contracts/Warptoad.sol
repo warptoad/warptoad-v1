@@ -169,16 +169,15 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
      * @param _chainConfig: see ChainConfig.sol. The giga index comes from there based on `block.chainid` so this
      * constructor has no chain specific args and the init code is the same on every chain
      */
-    constructor(
-        address _verifier,
-        uint256 _circuitSize,
-        address _chainConfig
-    ) {
+    constructor(address _verifier, uint256 _circuitSize, address _chainConfig) {
         verifier = IWarptoadVerifier(_verifier);
         CIRCUIT_SIZE = _circuitSize;
         gigaIndex = IChainConfig(_chainConfig).gigaIndex();
 
         SkinnyIMTPoseidon2WriteStorage.init(commitmentTree);
+        // at init root == 0 and size = 0. But +1 since 0 is does not exist sentinel value
+        localRoots[uint256(0)] = 1;
+        gigaRoots[uint256(0)] = 1;
     }
 
     // ------ SkinnyIMT overrides -----------
@@ -255,7 +254,10 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         );
         // TODO is this redundant? A wrapper replying "this is my range" to a warptoad it committed to during deployment,
         // and that warptoad instance was never in it's range??
-        require(gigaIndex >= _firstGigaIndex && gigaIndex <= _lastGigaIndex, "can't commit to a giga index range in _assetId which is out side of current giga index");
+        require(
+            gigaIndex >= _firstGigaIndex && gigaIndex <= _lastGigaIndex,
+            "can't commit to a giga index range in _assetId which is out side of current giga index"
+        );
         uint256 _commitment = Poseidon2.hash_3(
             _preCommitmentHash,
             _assetId,
@@ -331,8 +333,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         bytes32[] memory publicInputs = formatPublicInputs(
             _tx.roots,
             _tx.timeStamps,
-            // swaptoad only needs the first 2 message 
-            hashMessages(_tx.messages[0],_tx.messages[1]),
+            // swaptoad only needs the first 2 message
+            hashMessages(_tx.messages[0], _tx.messages[1]),
             _tx.publicHash,
             _tx.unshieldingCommitments,
             _tx.nullifiers,
@@ -368,24 +370,22 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         PubRootsAndIndexes calldata _roots,
         TimeStamps calldata _timeStamps
     ) private view {
-        uint256 treeSize = localRoots[_roots.localRoot];
-        if (treeSize == 0) revert UnknownLocalRoot(_roots.localRoot);
-        if (_roots.localEdgeIndex != treeSize - 1)
-            revert WrongLocalEdgeIndex(treeSize - 1, _roots.localEdgeIndex);
-        // gigaRoot == 0 is the "local only tx" sentinel, the circuit can't produce a giga root of 0.
-        // The edge index check matters: a prover chosen edge index proves the same leaf under a different
-        // index, which is a different nullifier, which is a cross-chain double spend. See merkle.nr
-        // TODO whatever relays giga roots into `gigaRoots` must store the tree size with the root, like
-        // `_insertCommitments` does for `localRoots`. A set of known roots alone can't validate the edge index
-        if (_roots.gigaRoot != 0) {
-            uint256 gigaTreeSize = gigaRoots[_roots.gigaRoot];
-            if (gigaTreeSize == 0) revert UnknownGigaRoot(_roots.gigaRoot);
-            if (_roots.gigaEdgeIndex != gigaTreeSize - 1)
-                revert WrongGigaEdgeIndex(
-                    gigaTreeSize - 1,
-                    _roots.gigaEdgeIndex
-                );
-        }
+        uint256 localTreeSize = localRoots[_roots.localRoot];
+        if (localTreeSize == 0) revert UnknownLocalRoot(_roots.localRoot);
+        if (_roots.localEdgeIndex != localTreeSize - 1)
+            revert WrongLocalEdgeIndex(
+                localTreeSize - 1,
+                _roots.localEdgeIndex
+            );
+
+        uint256 gigaTreeSize = gigaRoots[_roots.gigaRoot];
+        if (gigaTreeSize == 0) revert UnknownGigaRoot(_roots.gigaRoot);
+        if (_roots.gigaEdgeIndex != gigaTreeSize - 1)
+            revert WrongGigaEdgeIndex(
+                gigaTreeSize - 1,
+                _roots.gigaEdgeIndex
+            );
+
         if (_timeStamps.proofExpireTimeStamp < block.timestamp) {
             revert ProofExpired(
                 _timeStamps.proofExpireTimeStamp,
@@ -452,7 +452,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         UnshieldingCommitment calldata _unshieldData,
         UnshieldTarget calldata _unshieldTarget
     ) private {
-        address _recipeint = address(uint160(_unshieldData.recipient));
+        address _recipient = address(uint160(_unshieldData.recipient));
         if (_unshieldData.recipient >> 160 != 0)
             revert RecipientNotAnAddress(_unshieldData.recipient);
 
@@ -462,7 +462,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             uint256 _firstGigaIndex,
             uint256 _lastGigaIndex
         ) = IWrapperFactory(_unshieldTarget.wrapperFactory).unShield(
-                _recipeint,
+                _recipient,
                 _unshieldData.amount,
                 _unshieldTarget.wrapperArgs
             );
@@ -486,7 +486,7 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
 
         emit Unshielded(
             _unshieldTarget.wrapperFactory,
-            _recipeint,
+            _recipient,
             _unshieldData.assetId,
             _unshieldData.amount
         );
