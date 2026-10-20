@@ -12,7 +12,6 @@ import {IChainConfig} from "./interfaces/IChainConfig.sol";
 
 // TODO prob should be interfaces
 import {WrapperERC20} from "./WrapperERC20.sol";
-import {WrapperERC1155} from "./WrapperERC1155.sol";
 import {TokenMetadata} from "./libraries/TokenMetadata.sol";
 
 import {SkinnyIMTPoseidon2WriteStorage, SkinnyIMTDataStorage} from "@warptoad/skinny-imt.sol/poseidon2/SkinnyIMTPoseidon2WriteStorage.sol";

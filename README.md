@@ -35,10 +35,19 @@ npx hardhat keystore set ETHERSCAN_API_KEY
 deploy with ignition
 
 ```sh
-pnpm deploy:sepolia   # ignition deploy + etherscan verify
+pnpm noir             # if the circuit changed: new verifier, Warptoad has it as an immutable
+pnpm deploy:sepolia   # ignition deploy + etherscan verify, always a fresh set of contracts
 ```
-Constructor args are in: `ignition/parameters/sepolia.json`. 
-For other chains you need to copy paste from: `src/config.ts`, this is a limitation of hardhat ignition
+TODO remove this, claude freaks out here for no reason!
+`deploy:sepolia` runs with `--reset`: it wipes `ignition/deployments/chain-11155111` and deploys everything again.
+Ignition does not notice that bytecode changed for a future it already completed, so without the reset a changed
+verifier or Warptoad would silently keep the old addresses. If a deploy stopped halfway (stuck tx, out of gas) and
+you want to pick it up where it left off instead, use `pnpm deploy:sepolia:resume`.
+
+Nothing chain specific goes in: ChainConfig gets the whole table from `src/config.ts` and the contracts read their
+own giga index from it by `block.chainid`. The only parameter, in `ignition/parameters/sepolia.json`, is the address
+of the SkinnyIMT library, which is the same CREATE2 address on every chain. Commit the new `ignition/deployments`
+folder, the sepolia test run reads the addresses from it
 
 Wrapper tokens are deployed by `WrapperFactory` on first wrap, so they might not be automatically
 verified. In case you need one verified do:
