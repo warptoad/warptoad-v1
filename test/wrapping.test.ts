@@ -312,8 +312,9 @@ describe("Warptoad contracts", async function () {
             // the factory tries to burn on the underlying, which has no burn
             const bad = encodeWrapperArgs({ wrapper: token.address, underlying: token.address });
             await assert.rejects(d.warptoad.write.shield([d.factory.address, 42n, 1n, bad, "0x"]));
-            // the empty tree's root was never recorded, so nothing got inserted
-            assert.equal(await d.warptoad.read.localRoots([await d.warptoad.read.getSkinnyRoot([treeId])]), 0n);
+            // nothing got inserted: the tree still has the empty root, which the constructor records as size 0
+            assert.equal(await d.warptoad.read.getSkinnyRoot([treeId]), 0n);
+            assert.equal(await d.warptoad.read.localRoots([0n]), 1n);
         });
 
         it("rejects more than the shielder holds", async () => {
@@ -440,6 +441,7 @@ describe("Warptoad contracts", async function () {
             nullifiers: [1n, 2n, 3n, 4n],
             recipientCommitmentsHashes: zeros(),
             messages: new Array<Hex>(CIRCUIT_SIZE).fill("0x"),
+            publicHash: 0n,
             proof: "0x" as Hex,
         });
 
@@ -463,6 +465,7 @@ describe("Warptoad contracts", async function () {
                 { localRoot: 1n, localEdgeIndex: 2n, gigaRoot: 3n, gigaEdgeIndex: 4n },
                 { proofExpireTimeStamp: 7n, historicTimeStamp: 8n },
                 9n,
+                10n,
                 unshielding,
                 nullifiers,
                 recipients,
@@ -470,11 +473,13 @@ describe("Warptoad contracts", async function () {
             ]);
             const asBigInt = inputs.map((x) => BigInt(x));
 
-            // 8 head fields, then 3 per unshielding slot, then nullifiers, then recipient commitments.
-            // the giga index range moved into the assetId, only current_giga_index is left and the contract fills it in
-            const head = 8;
+            // 9 head fields, then 3 per unshielding slot, then nullifiers, then recipient commitments.
+            // the giga index range moved into the assetId, only current_giga_index is left and the contract fills it in.
+            // `PubInputs` in circuits/src/main.nr puts public_hash (passed through) before first_message_hash (the
+            // contract hashes it from the first two messages), so the proof only verifies with them in that order
+            const head = 9;
             assert.equal(asBigInt.length, head + CIRCUIT_SIZE * 5);
-            assert.deepEqual(asBigInt.slice(0, head), [1n, 2n, 3n, 4n, d.gigaIndex, 7n, 8n, 9n]);
+            assert.deepEqual(asBigInt.slice(0, head), [1n, 2n, 3n, 4n, d.gigaIndex, 7n, 8n, 10n, 9n]);
             assert.deepEqual(asBigInt.slice(head + 3, head + 6), [0x11n, 0x12n, 0x13n]);
             assert.equal(asBigInt[head + CIRCUIT_SIZE * 3 + 2], 0x22n);
             assert.equal(asBigInt[head + CIRCUIT_SIZE * 4 + 3], 0x33n);

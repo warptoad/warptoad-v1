@@ -1,0 +1,189 @@
+[priv_in]
+actual_amount_recipient_commitments = 0
+actual_amount_spend_commitments = 0
+circuit_comp_selector = 0
+
+[priv_in.auth]
+inputs = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[priv_in.auth.pub_key]
+x = 0
+y = 0
+
+[priv_in.auth.signature]
+scalar = 0
+x = 0
+y = 0
+
+[priv_in.owner]
+nullifier_secret = 0
+
+[priv_in.owner.pub_key]
+x = 0
+y = 0
+
+[priv_in.owner.signature]
+scalar = 0
+x = 0
+y = 0
+
+[[priv_in.recipient_commitments]]
+amount = 0
+asset_id = 0
+circuit_comp_input = [0, 0, 0]
+circuit_comp_selector = 0
+owner_hash = 0
+pre_commitment_hash = 0
+shared_nonce = 0
+
+[[priv_in.recipient_commitments]]
+amount = 0
+asset_id = 0
+circuit_comp_input = [0, 0, 0]
+circuit_comp_selector = 0
+owner_hash = 0
+pre_commitment_hash = 0
+shared_nonce = 0
+
+[[priv_in.recipient_commitments]]
+amount = 0
+asset_id = 0
+circuit_comp_input = [0, 0, 0]
+circuit_comp_selector = 0
+owner_hash = 0
+pre_commitment_hash = 0
+shared_nonce = 0
+
+[[priv_in.recipient_commitments]]
+amount = 0
+asset_id = 0
+circuit_comp_input = [0, 0, 0]
+circuit_comp_selector = 0
+owner_hash = 0
+pre_commitment_hash = 0
+shared_nonce = 0
+
+[[priv_in.spend_commitments]]
+local_edge_index = 0
+
+[priv_in.spend_commitments.commitment]
+amount = 0
+asset_id = 0
+circuit_comp_selector = 0
+circuit_comp_storage = [0, 0, 0]
+first_giga_index = 0
+last_giga_index = 0
+owner_hash = 0
+shared_nonce = 0
+wrapper_id = 0
+
+[priv_in.spend_commitments.giga_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[priv_in.spend_commitments.local_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[priv_in.spend_commitments]]
+local_edge_index = 0
+
+[priv_in.spend_commitments.commitment]
+amount = 0
+asset_id = 0
+circuit_comp_selector = 0
+circuit_comp_storage = [0, 0, 0]
+first_giga_index = 0
+last_giga_index = 0
+owner_hash = 0
+shared_nonce = 0
+wrapper_id = 0
+
+[priv_in.spend_commitments.giga_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[priv_in.spend_commitments.local_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[priv_in.spend_commitments]]
+local_edge_index = 0
+
+[priv_in.spend_commitments.commitment]
+amount = 0
+asset_id = 0
+circuit_comp_selector = 0
+circuit_comp_storage = [0, 0, 0]
+first_giga_index = 0
+last_giga_index = 0
+owner_hash = 0
+shared_nonce = 0
+wrapper_id = 0
+
+[priv_in.spend_commitments.giga_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[priv_in.spend_commitments.local_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[[priv_in.spend_commitments]]
+local_edge_index = 0
+
+[priv_in.spend_commitments.commitment]
+amount = 0
+asset_id = 0
+circuit_comp_selector = 0
+circuit_comp_storage = [0, 0, 0]
+first_giga_index = 0
+last_giga_index = 0
+owner_hash = 0
+shared_nonce = 0
+wrapper_id = 0
+
+[priv_in.spend_commitments.giga_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[priv_in.spend_commitments.local_proof]
+index = 0
+siblings = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+
+[pub_in]
+first_message_hash = 0
+nullifiers = [0, 0, 0, 0]
+public_hash = 0
+recipient_commitments_hashes = [0, 0, 0, 0]
+
+[pub_in.roots]
+current_giga_index = 0
+giga_edge_index = 0
+giga_root = 0
+local_edge_index = 0
+local_root = 0
+
+[pub_in.time_stamps]
+historic_time_stamp = 0
+proof_expire_time_stamp = 0
+
+[[pub_in.unshielding_commitments]]
+amount = 0
+asset_id = 0
+recipient = 0
+
+[[pub_in.unshielding_commitments]]
+amount = 0
+asset_id = 0
+recipient = 0
+
+[[pub_in.unshielding_commitments]]
+amount = 0
+asset_id = 0
+recipient = 0
+
+[[pub_in.unshielding_commitments]]
+amount = 0
+asset_id = 0
+recipient = 0

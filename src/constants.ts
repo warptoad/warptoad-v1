@@ -3,9 +3,8 @@
  */
 import { poseidon2Hash } from "@zkpassport/poseidon2";
 
-// asset_id, amount, expiry, ref_to_lock: 4 inputs needed, poseidon2 cost is the
-// same up to 6, so 6.
-export const CIRCUIT_COMP_AUTH_SIZE = 6;
+// swaptoad needs 8 inputs, atomictoad more. 11 is exactly 3 poseidon2 absorb rounds (3*4-1)
+export const CIRCUIT_COMP_AUTH_SIZE = 11;
 export const CIRCUIT_COMP_STORAGE_SIZE = 3;
 export const CIRCUIT_COMP_STORAGE_EMPTY: readonly bigint[] = Object.freeze(
     new Array<bigint>(CIRCUIT_COMP_STORAGE_SIZE).fill(0n),
@@ -21,6 +20,10 @@ export const MAX_TREE_DEPTH = 40;
 /** ascii "JOIN_SPLIT", right-aligned in 32 bytes */
 export const JOIN_SPLIT_SELECTOR =
     0x000000000000000000000000000000000000000000004a4f494e5f53504c4954n;
+
+/** ascii "TOAD_SWAP", right-aligned in 32 bytes */
+export const SWAP_TOAD_SELECTOR =
+    0x0000000000000000000000000000000000000000000000544f41445f53574150n;
 
 export const JOIN_SPLIT_NULLIFIER_SLOT = 0x00n;
 export const SWAP_NULLIFIER_SLOT = 0x00n;

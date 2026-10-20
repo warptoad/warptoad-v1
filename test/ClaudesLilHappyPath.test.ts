@@ -24,6 +24,7 @@ import {
     hashFakeNullifier,
     hashNullifier,
     hashOwner,
+    hashOwnerKeys,
     hashPreCommitment,
     hashSpendSignatureInputs,
     type CircuitSizeFields,
@@ -35,6 +36,7 @@ import {
     noAuth,
     hashNote,
     noUnshield,
+    preCommitmentHashOf,
     prove,
     pubRoots,
     recipientInput,
@@ -51,9 +53,10 @@ import type { Hex } from "viem";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
 import { deployInfra, deployWarptoad, wrap, ZERO_ADDRESS, type Deployment } from "./fixtures.js";
 
-// no encrypted blobs here, but the contract always hashes the messages into public_hash. See ClaudeLilMessaging.test.ts
+// no encrypted blobs here, but the contract always hashes the first two messages into first_message_hash,
+// and public_hash goes in the spend signature. See ClaudeLilMessaging.test.ts
 const NO_MESSAGES: Hex[] = ["0x", "0x", "0x", "0x"];
-const { hash: PUBLIC_HASH, preimage: PUBLIC_HASH_PREIMAGE } = publicHashOf(NO_MESSAGES);
+const { publicHash: PUBLIC_HASH, firstMessageHash: FIRST_MESSAGE_HASH } = publicHashOf(NO_MESSAGES);
 const noTarget = { wrapperFactory: ZERO_ADDRESS, wrapperArgs: "0x" as Hex };
 // the esm build of eddsa-poseidon trips over blakejs' cjs exports under node, the cjs build is fine
 const { derivePublicKey, signMessage } = createRequire(import.meta.url)("@zk-kit/eddsa-poseidon") as {
@@ -94,7 +97,8 @@ describe("ClaudesLilHappyPath", async function () {
     for (const who of [alice, bob]) {
         const [x, y] = derivePublicKey(who.eddsaKey);
         who.pubKey = { x, y };
-        who.ownerHash = hashOwner({ spendPubKey: who.pubKey, destGigaIndex: gigaIndex, nullifierSecret: who.nullifierSecret });
+        const ownerKeysHash = hashOwnerKeys({ spendPubKey: who.pubKey, nullifierSecret: who.nullifierSecret });
+        who.ownerHash = hashOwner({ ownerKeysHash, gigaIndex });
     }
 
     // the notes that exist during the story
@@ -143,6 +147,7 @@ describe("ClaudesLilHappyPath", async function () {
             circuitCompSelector: JOIN_SPLIT_SELECTOR,
             circuitCompStorageHash: CIRCUIT_COMP_STORAGE_EMPTY_HASH,
         });
+        assert.equal(preCommitmentHash, preCommitmentHashOf(aliceDeposit));
         await d.warptoad.write.shield([d.factory.address, preCommitmentHash, 400n, wrapperArgs, "0x"], { account: aliceWallet.account });
 
         assert.equal(await wrapper.read.balanceOf([aliceWallet.account.address]), 600n);
@@ -183,12 +188,12 @@ describe("ClaudesLilHappyPath", async function () {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
                 public_hash: PUBLIC_HASH,
+                first_message_hash: FIRST_MESSAGE_HASH,
                 unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
             priv_in: {
-                public_hash_preimage: PUBLIC_HASH_PREIMAGE,
                 recipient_commitments: recipients.map(function (n) {
                     return recipientInput(n);
                 }),
@@ -220,11 +225,13 @@ describe("ClaudesLilHappyPath", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages: NO_MESSAGES,
+            publicHash: PUBLIC_HASH,
             proof,
         };
-        // the contract lays public inputs out the same way bb did
+        // the contract lays public inputs out the same way bb did, and hashes the first two messages the same way the sdk does
+        assert.equal(await d.warptoad.read.hashMessages([NO_MESSAGES[0], NO_MESSAGES[1]]), FIRST_MESSAGE_HASH);
         const formatted = await d.warptoad.read.formatPublicInputs([
-            tx.roots, tx.timeStamps, PUBLIC_HASH, tx.unshieldingCommitments, tx.nullifiers, tx.recipientCommitmentsHashes, gigaIndex,
+            tx.roots, tx.timeStamps, FIRST_MESSAGE_HASH, PUBLIC_HASH, tx.unshieldingCommitments, tx.nullifiers, tx.recipientCommitmentsHashes, gigaIndex,
         ]);
         assert.deepEqual(
             formatted.map(function (x) {
@@ -274,12 +281,12 @@ describe("ClaudesLilHappyPath", async function () {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
                 public_hash: PUBLIC_HASH,
+                first_message_hash: FIRST_MESSAGE_HASH,
                 unshielding_commitments: [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()],
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
             priv_in: {
-                public_hash_preimage: PUBLIC_HASH_PREIMAGE,
                 recipient_commitments: recipients.map(function (n) {
                     return recipientInput(n);
                 }),
@@ -315,6 +322,7 @@ describe("ClaudesLilHappyPath", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages: NO_MESSAGES,
+            publicHash: PUBLIC_HASH,
             proof,
         };
         await d.warptoad.write.transactPrivate([tx]);

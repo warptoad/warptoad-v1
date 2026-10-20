@@ -113,8 +113,6 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             proven_commitments[index].circuit_comp_storage =
                 spend_commitment.commitment.circuit_comp_storage;
             proven_commitments[index].local_leaf_index = spend_commitment.local_proof.index;
-            // @notice owner_keys_hash is not constraint to owner_hash, this is confusing since we say this is a "proven commitment"
-            proven_commitments[index].owner_keys_hash = spend_commitment.commitment.owner_keys_hash;
             proven_commitments[index].owner_hash = spend_commitment.commitment.owner_hash
         } else {
             // it's a fake commitment so we make a fake_commitment hash
@@ -149,9 +147,11 @@ fn greater_or_equal(a: Field, b: Field) -> bool {
 
 struct CommitmentProofData {
     owner_hash: Field,
-    owner_keys_hash: Field,
     shared_nonce: Field,
     circuit_comp_selector: Field,
+    // TODO we can optimize by removing this and not hashing this in proof_root_of_commitments
+    // and instead just pass 1 array of this through to circuit components that actually need it
+    // like join_split does not need it, rest does. Saves `CIRUIT_SIZE - 1` hashes and private inputs
     circuit_comp_storage: [Field; CIRCUIT_COMP_STORAGE_SIZE],
     asset_id: Field,
     amount: Field,
@@ -183,7 +183,6 @@ pub struct ProvenCommitment {
     giga_leaf_index: Field,
     local_leaf_index: Field,
     shared_nonce: Field,
-    owner_keys_hash: Field,
 }
 
 struct CommitmentSpendProof<let MAX_DEPTH: u32> {
@@ -434,6 +433,7 @@ pub struct SwapToadOrder {
     expiry: Field,
     first_message_hash: Field,
     maker_pre_commitment_hash: Field,
+    owner_keys_hash: Field
 }
 
 pub struct SwapToadStorage {
@@ -532,6 +532,7 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             // TODO we need 2 messages, for maker_change_commit and taker_change_commit
             first_message_hash: inputs.auth_sig_inputs[5],
             maker_pre_commitment_hash: inputs.auth_sig_inputs[6],
+            owner_keys_hash: inputs.auth_sig_inputs[7],
         };
 
         assert(
@@ -542,6 +543,7 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             maker_change_commit.pre_commitment_hash == signed_order.maker_pre_commitment_hash,
             "maker change commitment needs the specified maker_pre_commitment_hash from the signed swaptoad order",
         );
+        // TODO maybe 2 message hashes (one per maker note) instead of one over messages[0..2], uncomplicates the wallet sdk
         assert(
             inputs.first_message_hash == signed_order.first_message_hash,
             "first_message_hash does not match makers required first_message_hash from auth_sig_inputs",
@@ -564,7 +566,7 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
         // TODO optimize!!
         assert(
             locked_commitment.owner_hash
-                == hash_owner(locked_commitment.owner_keys_hash, inputs.current_giga_index),
+                == hash_owner(signed_order.owner_keys_hash, inputs.current_giga_index),
             "giga_index mismatch in locked commitment. This locked commitment can only be spend on it's one giga_index it has. And the correct owner_keys_hash of maker needs to be provided.",
         );
 

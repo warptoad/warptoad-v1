@@ -526,8 +526,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         publicInputs[4] = bytes32(uint256(_gigaIndex)); // current_giga_index
         publicInputs[5] = bytes32(_timeStamps.proofExpireTimeStamp);
         publicInputs[6] = bytes32(_timeStamps.historicTimeStamp);
-        publicInputs[7] = bytes32(_messagesHash);
-        publicInputs[8] = bytes32(_publicHash);
+        publicInputs[7] = bytes32(_publicHash);
+        publicInputs[8] = bytes32(_messagesHash); // first_message_hash
 
         uint256 unshieldingOffset = PUBLIC_INPUTS_HEAD;
         uint256 nullifiersOffset = unshieldingOffset + size * 3;

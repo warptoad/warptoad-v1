@@ -24,8 +24,8 @@ export type PubKey = { x: bigint; y: bigint };
 
 /** `[Field; CIRCUIT_COMP_STORAGE_SIZE]` */
 export type CircuitCompStorage = [bigint, bigint, bigint];
-/** `[Field; CIRCUIT_COMP_AUTH_SIZE]` */
-export type CircuitCompAuthSigInputs = [bigint, bigint, bigint, bigint, bigint, bigint];
+/** `[Field; CIRCUIT_COMP_AUTH_SIZE]`, see `authSigInputs` in proving.ts to pad a shorter list */
+export type CircuitCompAuthSigInputs = bigint[];
 /** `[Field; CIRCUIT_SIZE]` */
 export type CircuitSizeFields = [bigint, bigint, bigint, bigint];
 
@@ -86,17 +86,35 @@ export function hashPreCommitment({
     return poseidon2Hash([ownerHash, sharedNonce, circuitCompSelector, circuitCompStorageHash]);
 }
 
-/** `hash_owner`: Poseidon2([spend_pub_key.x, spend_pub_key.y, dest_giga_index, nullifier_secret]) */
-export function hashOwner({
-    spendPubKey,
-    destGigaIndex,
-    nullifierSecret,
+/**
+ * `hash_owner_keys`: Poseidon2([spend_pub_key.x, spend_pub_key.y, nullifier_secret])
+ *
+ * The chain independent half of an owner hash. Telling someone this reveals which giga index every
+ * owner hash of yours is on, so only share it when that is fine (a swaptoad maker gives it to the taker)
+ */
+export function hashOwnerKeys({ spendPubKey, nullifierSecret }: { spendPubKey: PubKey; nullifierSecret: bigint }): bigint {
+    return poseidon2Hash([spendPubKey.x, spendPubKey.y, nullifierSecret]);
+}
+
+/** `hash_owner`: Poseidon2([owner_keys_hash, giga_index]), the giga index of the chain the owner spends on */
+export function hashOwner({ ownerKeysHash, gigaIndex }: { ownerKeysHash: bigint; gigaIndex: bigint }): bigint {
+    return poseidon2Hash([ownerKeysHash, gigaIndex]);
+}
+
+/**
+ * `hash_shared_nonce_swaptoad`: Poseidon2([shared_nullifier_secret, commitment_type])
+ *
+ * On a fill the taker builds the maker's two notes, so their nonces are derived from the lock's shared secret:
+ * type 0 is the note the maker gets paid in, type 1 is the maker's change
+ */
+export function hashSharedNonceSwaptoad({
+    sharedNullifierSecret,
+    commitmentType,
 }: {
-    spendPubKey: PubKey;
-    destGigaIndex: bigint;
-    nullifierSecret: bigint;
+    sharedNullifierSecret: bigint;
+    commitmentType: bigint;
 }): bigint {
-    return poseidon2Hash([spendPubKey.x, spendPubKey.y, destGigaIndex, nullifierSecret]);
+    return poseidon2Hash([sharedNullifierSecret, commitmentType]);
 }
 
 /**
@@ -121,8 +139,9 @@ export function hashSpendSignatureInputs({
 }
 
 /**
- * `hash_public`: Poseidon2([messages_hash, other_hash]), the circuit's `public_hash`.
- * `messagesHash` is keccak(messages) >> 8, see `hashMessages` in messages.ts. `otherHash` is 0 for now
+ * `hash_public`: Poseidon2([messages_hash, other_hash]), the sdk's convention for the circuit's `public_hash`.
+ * The contract passes `publicHash` through to the proof unchecked, only `first_message_hash` is computed onchain,
+ * so what goes in here is up to the signer. `messagesHash` is `hashMessages` in messages.ts, `otherHash` is 0 for now
  */
 export function hashPublic({ messagesHash, otherHash }: { messagesHash: bigint; otherHash: bigint }): bigint {
     return poseidon2Hash([messagesHash, otherHash]);

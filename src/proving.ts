@@ -8,13 +8,7 @@ import { Noir, type CompiledCircuit, type InputMap } from "@noir-lang/noir_js";
 import type { UltraHonkBackend } from "@aztec/bb.js";
 import { Trees } from "@warptoad/skinny-fat-imt-js";
 import { toHex, type Address, type Hex, type PublicClient } from "viem";
-import {
-    CIRCUIT_COMP_AUTH_SIZE,
-    CIRCUIT_COMP_STORAGE_EMPTY,
-    CIRCUIT_COMP_STORAGE_SIZE,
-    JOIN_SPLIT_SELECTOR,
-    MAX_TREE_DEPTH,
-} from "./constants.js";
+import { CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_EMPTY, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH } from "./constants.js";
 import {
     hashCircuitComponentStorage,
     hashCommitment,
@@ -138,32 +132,34 @@ function storageOf(n: Note): CircuitCompStorage {
     return n.circuitCompStorage ?? ([...CIRCUIT_COMP_STORAGE_EMPTY] as CircuitCompStorage);
 }
 
-/** the leaf a note is inserted as */
-export function hashNote(n: Note): bigint {
-    return hashCommitment({
-        preCommitmentHash: hashPreCommitment({
-            ownerHash: n.ownerHash,
-            sharedNonce: n.sharedNonce,
-            circuitCompSelector: selectorOf(n),
-            circuitCompStorageHash: hashCircuitComponentStorage({ circuitCompStorage: storageOf(n) }),
-        }),
-        assetId: n.assetId,
-        amount: n.amount,
+/** what `Warptoad.shield` takes: everything in the leaf except the asset and amount */
+export function preCommitmentHashOf(n: Note): bigint {
+    return hashPreCommitment({
+        ownerHash: n.ownerHash,
+        sharedNonce: n.sharedNonce,
+        circuitCompSelector: selectorOf(n),
+        circuitCompStorageHash: hashCircuitComponentStorage({ circuitCompStorage: storageOf(n) }),
     });
 }
 
+/** the leaf a note is inserted as */
+export function hashNote(n: Note): bigint {
+    return hashCommitment({ preCommitmentHash: preCommitmentHashOf(n), assetId: n.assetId, amount: n.amount });
+}
+
 /**
- * a recipient slot of the circuit. `circuitCompInput` is what the recipient's circuit component
- * constructor gets, join_split ignores it. Fakes only need a nonce
+ * a recipient slot of the circuit. join_split only looks at `pre_commitment_hash`, `asset_id` and `amount`, other
+ * circuit components (swaptoad for the maker's notes) check the fields it was hashed from too. Fakes only need a nonce
  */
-export function recipientInput(n: Note, circuitCompInput: bigint[] = zeros(CIRCUIT_COMP_STORAGE_SIZE)): CommitmentRecipientDataInput {
+export function recipientInput(n: Note): CommitmentRecipientDataInput {
     return {
         owner_hash: n.ownerHash,
         shared_nonce: n.sharedNonce,
         circuit_comp_selector: selectorOf(n),
-        circuit_comp_input: circuitCompInput,
+        circuit_comp_input: [...storageOf(n)],
         asset_id: n.assetId,
         amount: n.amount,
+        pre_commitment_hash: preCommitmentHashOf(n),
     };
 }
 
@@ -181,6 +177,7 @@ export function spendInput(
 ): CommitmentSpendProofInput {
     return {
         commitment: {
+            owner_hash: n.ownerHash,
             shared_nonce: n.sharedNonce,
             circuit_comp_selector: selectorOf(n),
             circuit_comp_storage: [...storageOf(n)],
@@ -209,12 +206,21 @@ export function fakeSpendInput(nonce: bigint): CommitmentSpendProofInput {
     return spendInput(fakeNote(nonce), FAKE_ASSET, emptyProof(), 0n);
 }
 
-/** join_split doesn't use the auth signature, so it stays all zeros and the circuit skips it */
+/** pads what a circuit component signs over to CIRCUIT_COMP_AUTH_SIZE, which is what `hash_circuit_component_auth_sig` hashes */
+export function authSigInputs(inputs: bigint[]): CircuitCompAuthSigInputs {
+    if (inputs.length > CIRCUIT_COMP_AUTH_SIZE) throw new Error(`${inputs.length} auth inputs, the circuit takes ${CIRCUIT_COMP_AUTH_SIZE}`);
+    return [...inputs, ...zeros(CIRCUIT_COMP_AUTH_SIZE - inputs.length)];
+}
+
+/**
+ * no auth signature: `pub_key.x == 0` is the sentinel the circuit skips the signature check on. join_split never
+ * needs one, and for swaptoad it means the owner is cancelling their own lock
+ */
 export function noAuth(): AuthInputs {
     return {
         pub_key: { x: 0n, y: 0n },
         signature: { x: 0n, y: 0n, scalar: 0n },
-        inputs: zeros(CIRCUIT_COMP_AUTH_SIZE) as CircuitCompAuthSigInputs,
+        inputs: authSigInputs([]),
     };
 }
 

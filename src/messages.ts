@@ -31,7 +31,7 @@ import {
 import { CIRCUIT_COMP_STORAGE_EMPTY, JOIN_SPLIT_SELECTOR } from "./constants.js";
 import { hashPublic, keccak31Byte, type CircuitCompStorage } from "./hashing.js";
 import { fakeNote, hashNote } from "./proving.js";
-import type { Note, PublicHashPreimageInput, WarptoadContract } from "./types.js";
+import type { Note, WarptoadContract } from "./types.js";
 
 /** secp256k1, `publicKey` is the compressed 33 bytes. Share `toHex(publicKey)` as your address */
 export type ViewKey = { privateKey: Uint8Array; publicKey: Uint8Array };
@@ -128,18 +128,23 @@ export async function fakeMessage(nonce: bigint): Promise<Hex> {
     return encryptNote(fakeNote(nonce), secp256k1.getPublicKey(secp256k1.utils.randomPrivateKey(), true));
 }
 
-/** keccak31Byte(abi.encode(messages)), the first half of `Warptoad.hashPublic` */
+/**
+ * mirror of `Warptoad.hashMessages`: keccak31Byte(abi.encode(messages[0], messages[1])), the circuit's
+ * `first_message_hash`. Only the first two slots: that is what a swaptoad maker signs over, the rest of the
+ * messages are not bound to the proof by the contract
+ */
 export function hashMessages(messages: Hex[]): bigint {
-    return keccak31Byte(encodeAbiParameters([{ type: "bytes[]" }], [messages]));
+    return keccak31Byte(encodeAbiParameters([{ type: "bytes" }, { type: "bytes" }], [messages[0], messages[1]]));
 }
 
 /**
- * mirror of `Warptoad.hashPublic`: the circuit's `public_hash`, goes in the spend signature too.
- * `preimage` is what the circuit gets as `public_hash_preimage`. `other_hash` is 0 until there is something else public
+ * the two message related public inputs of a tx. `firstMessageHash` the contract recomputes from the messages,
+ * `publicHash` it passes through as given. The sdk sets it to `hashPublic(firstMessageHash, 0)` so the spend
+ * signature covers the first two messages, see `hash_public` in circuits/src/hashing.nr
  */
-export function publicHashOf(messages: Hex[]): { hash: bigint; preimage: PublicHashPreimageInput } {
-    const preimage = { messages_hash: hashMessages(messages), other_hash: 0n };
-    return { hash: hashPublic({ messagesHash: preimage.messages_hash, otherHash: preimage.other_hash }), preimage };
+export function publicHashOf(messages: Hex[]): { publicHash: bigint; firstMessageHash: bigint } {
+    const firstMessageHash = hashMessages(messages);
+    return { publicHash: hashPublic({ messagesHash: firstMessageHash, otherHash: 0n }), firstMessageHash };
 }
 
 /**

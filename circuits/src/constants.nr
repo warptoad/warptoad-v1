@@ -1,8 +1,9 @@
 use poseidon::poseidon2::Poseidon2;
 
 // asset_id, amount, expiry, ref_to_lock.
-// swaptoad needs 7 inputs
-pub global CIRCUIT_COMP_AUTH_SIZE: u32 = 7;
+// swaptoad needs 7-8 inputs, atomictoad needs atleast more then that!
+// So we do 11, that matches exactly 3 poseidon2 absorb rounds (3*4-1)
+pub global CIRCUIT_COMP_AUTH_SIZE: u32 = 11;
 pub global CIRCUIT_COMP_STORAGE_SIZE: u32 = 3;
 pub global CIRCUIT_COMP_STORAGE_EMPTY: [Field; CIRCUIT_COMP_STORAGE_SIZE] = std::mem::zeroed();
 pub global CIRCUIT_COMP_STORAGE_EMPTY_HASH: Field =

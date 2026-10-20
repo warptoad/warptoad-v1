@@ -36,6 +36,7 @@ export type MerkleProofInput = { index: bigint; siblings: bigint[] };
 export type SignatureInput = { x: bigint; y: bigint; scalar: bigint };
 
 export type CommitmentProofDataInput = {
+    owner_hash: bigint;
     shared_nonce: bigint;
     circuit_comp_selector: bigint;
     circuit_comp_storage: bigint[];
@@ -61,6 +62,8 @@ export type CommitmentRecipientDataInput = {
     circuit_comp_input: bigint[];
     asset_id: bigint;
     amount: bigint;
+    /** the leaf is hashed from this directly, join_split never checks it against the fields above */
+    pre_commitment_hash: bigint;
 };
 
 export type UnshieldingCommitmentInput = { recipient: bigint; amount: bigint; asset_id: bigint };
@@ -79,6 +82,8 @@ export type PubInputs = {
     roots: PubRootsAndIndexesInput;
     time_stamps: TimeStampsInput;
     public_hash: bigint;
+    /** `Warptoad.hashMessages(messages[0], messages[1])`, see `hashMessages` in messages.ts */
+    first_message_hash: bigint;
     unshielding_commitments: UnshieldingCommitmentInput[];
     nullifiers: CircuitSizeFields;
     recipient_commitments_hashes: CircuitSizeFields;
@@ -88,11 +93,7 @@ export type OwnerInputs = { pub_key: PubKey; nullifier_secret: bigint; signature
 
 export type AuthInputs = { pub_key: PubKey; signature: SignatureInput; inputs: CircuitCompAuthSigInputs };
 
-/** `PublicHashPreimage`: Poseidon2 of these two is `public_hash`, see `publicHashOf` in messages.ts */
-export type PublicHashPreimageInput = { messages_hash: bigint; other_hash: bigint };
-
 export type PrivInputs = {
-    public_hash_preimage: PublicHashPreimageInput;
     recipient_commitments: CommitmentRecipientDataInput[];
     /** u32 in the circuit, so a number */
     actual_amount_recipient_commitments: number;

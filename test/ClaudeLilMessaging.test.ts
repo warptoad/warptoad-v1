@@ -3,7 +3,7 @@
  *
  *   1. alice wraps 1000 and shields 400 to herself, with a note encrypted to her own view key
  *   2. alice sends bob 300 and 100 change, one encrypted note per slot, fakes get garbage.
- *      A relayer that swaps a message gets a verifier revert, the messages are in public_hash
+ *      A relayer that swaps one of the first two messages gets a verifier revert, those are in first_message_hash
  *   3. bob and alice scan every Message event and find exactly their own notes. Bob turns the assetId in his
  *      note back into the asset preimage and the wrapper with eth_calls only, see src/assets.ts
  *   4. bob unshields the note he found into wrapped USDC and unwraps it into the real thing
@@ -33,6 +33,7 @@ import {
     hashFakeNullifier,
     hashNullifier,
     hashOwner,
+    hashOwnerKeys,
     hashPreCommitment,
     hashSpendSignatureInputs,
     type CircuitSizeFields,
@@ -143,7 +144,8 @@ describe("ClaudeLilMessaging", async function () {
         for (const who of [alice, bob]) {
             const [x, y] = derivePublicKey(who.eddsaKey);
             who.pubKey = { x, y };
-            who.ownerHash = hashOwner({ spendPubKey: who.pubKey, destGigaIndex: gigaIndex, nullifierSecret: who.nullifierSecret });
+            const ownerKeysHash = hashOwnerKeys({ spendPubKey: who.pubKey, nullifierSecret: who.nullifierSecret });
+            who.ownerHash = hashOwner({ ownerKeysHash, gigaIndex });
         }
 
         const mockAddress = MOCK_ERC20[chainId];
@@ -200,7 +202,7 @@ describe("ClaudeLilMessaging", async function () {
         ]);
     });
 
-    it("2. alice sends bob 300 and 100 change, messages included, relayer can't touch them", async () => {
+    it("2. alice sends bob 300 and 100 change, messages included, relayer can't touch the first two", async () => {
         const localTree = await tree();
         const { proof: localProof, edgeIndex } = merkleProofInput(localTree, hashNote(aliceDeposit));
 
@@ -227,7 +229,7 @@ describe("ClaudeLilMessaging", async function () {
             await fakeMessage(nonce(2003)),
             await fakeMessage(nonce(2004)),
         ];
-        const { hash: publicHash, preimage: publicHashPreimage } = publicHashOf(messages);
+        const { publicHash, firstMessageHash } = publicHashOf(messages);
 
         const sigHash = hashSpendSignatureInputs({
             publicHash,
@@ -243,12 +245,12 @@ describe("ClaudeLilMessaging", async function () {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
                 public_hash: publicHash,
+                first_message_hash: firstMessageHash,
                 unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
             priv_in: {
-                public_hash_preimage: publicHashPreimage,
                 recipient_commitments: recipients.map(function (n) {
                     return recipientInput(n);
                 }),
@@ -278,11 +280,13 @@ describe("ClaudeLilMessaging", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages,
+            publicHash,
             proof,
         };
-        assert.equal(await warptoad.read.hashPublic([messages]), publicHash);
+        assert.equal(await warptoad.read.hashMessages([messages[0], messages[1]]), firstMessageHash);
 
-        // a relayer swapping bob's message for garbage changes public_hash, which alice signed.
+        // a relayer swapping bob's message for garbage changes first_message_hash, a public input the proof was made for.
+        // Only the first two messages are hashed by the contract, the other two are not bound to the proof.
         // The generated verifier reverts with its own errors instead of returning false, so no VerificationFailed to match on
         const tampered = { ...tx, messages: [await fakeMessage(666n), ...messages.slice(1)] };
         await assert.rejects(warptoad.write.transactPrivate([tampered]));
@@ -344,7 +348,7 @@ describe("ClaudeLilMessaging", async function () {
             await fakeMessage(nonce(3002)),
             await fakeMessage(nonce(3003)),
         ];
-        const { hash: publicHash, preimage: publicHashPreimage } = publicHashOf(messages);
+        const { publicHash, firstMessageHash } = publicHashOf(messages);
 
         const sigHash = hashSpendSignatureInputs({
             publicHash,
@@ -360,12 +364,12 @@ describe("ClaudeLilMessaging", async function () {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
                 public_hash: publicHash,
+                first_message_hash: firstMessageHash,
                 unshielding_commitments: [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()],
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
             priv_in: {
-                public_hash_preimage: publicHashPreimage,
                 recipient_commitments: recipients.map(function (n) {
                     return recipientInput(n);
                 }),
@@ -402,6 +406,7 @@ describe("ClaudeLilMessaging", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages,
+            publicHash,
             proof,
         };
 
