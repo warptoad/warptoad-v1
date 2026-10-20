@@ -4,7 +4,6 @@ use crate::constants::{
 };
 use crate::{ProvenCommitment, PubKey};
 use poseidon::poseidon2::{Poseidon2};
-use super::constants::TOAD_SWAP_SELECTOR;
 
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
 
@@ -70,10 +69,25 @@ pub fn hash_pre_commitment(
     )
 }
 
-pub fn hash_owner(pub_key: PubKey, giga_index: Field, nullifier_secret: Field) -> Field {
+// @notice, if a user does not mind telling the recipient what chain they are on
+// they can just tell them their owner_keys_hash
+// then sender knows and even can set it to any giga_index they choose
+// @notice nullifier_secret should not be re-used so you can limit which
+// warptoad address reveals on which chain it is on and which does not.
+// otherwise owner_keys_hash is the same every time and sender can guess the giga_index
+pub fn hash_owner(owner_keys_hash: Field, giga_index: Field) -> Field {
     Poseidon2::hash(
-        [pub_key.x, pub_key.y, giga_index, nullifier_secret],
-        4,
+        [owner_keys_hash, giga_index],
+        2,
+    )
+}
+
+
+
+pub fn hash_owner_keys(pub_key: PubKey, nullifier_secret: Field) -> Field {
+    Poseidon2::hash(
+        [pub_key.x, pub_key.y, nullifier_secret],
+        3,
     )
 }
 
