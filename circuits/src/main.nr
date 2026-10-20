@@ -16,7 +16,6 @@ use crate::constants::{
 };
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
-use std::string;
 
 fn proof_local_root_to_giga_root<let MAX_DEPTH: u32>(
     proof: LeafAndIndexInclusionProof<MAX_DEPTH>,
@@ -113,6 +112,7 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             proven_commitments[index].circuit_comp_storage =
                 spend_commitment.commitment.circuit_comp_storage;
             proven_commitments[index].local_leaf_index = spend_commitment.local_proof.index;
+            proven_commitments[index].owner_hash = spend_commitment.commitment.owner_hash;
         } else {
             // it's a fake commitment so we make a fake_commitment hash
             // don't need this because this is not a commitment publicly inserted in the tree
@@ -309,7 +309,7 @@ fn main(
         "invalid spend signature",
     );
 
-    if (priv_in.auth.inputs != std::mem::zeroed()) {
+    if (priv_in.auth.pub_key.x != 0x00) {
         let auth_sig_hash: Field = hash_circuit_component_auth_sig(priv_in.auth.inputs);
         assert(
             verify_signature(priv_in.auth.pub_key, priv_in.auth.signature, auth_sig_hash),
@@ -420,10 +420,10 @@ pub struct CircuitCompInputs<let SIZE: u32> {
 // but that is not scary enough for me
 // simple fix is to only use one auth pubkey per live locked commitment!
 pub struct SwapToadOrder {
-    maker_asset_id: Field,
-    maker_amount: Field,
-    taker_asset_id: Field,
-    taker_amount: Field,
+    listing_asset_id: Field,
+    listing_amount: Field,
+    payment_asset_id: Field,
+    payment_amount: Field,
     expiry: Field,
     first_message_hash: Field,
     maker_pre_commitment_hash: Field,
@@ -479,7 +479,19 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
     let mut maker_new_commit_hash: Field = 0x00;
     let mut taker_change_commit_hash: Field = 0x00;
     let mut taker_new_commit_hash: Field = 0x00;
+    assert(
+        maker_change_commit.asset_id == locked_commitment.asset_id,
+        "maker_change_commit asset_id should always match the locked_commitment asset_id",
+    );
     if (inputs.auth_sig_pubkey.x == 0x00) {
+        assert(
+            inputs.actual_amount_recipient_commitments == 1,
+            "Canceling a swaptoad trade can only create 1 new commitment",
+        );
+        assert(
+            locked_commitment.owner_hash == inputs.owner_hash,
+            "only owner can cancel a swaptoad trade",
+        );
         // auth_sig_inputs set to zero? okay no signature was provided in private inputs of circuit.
         // that means that owner of the commitment want to cancel
         // they just want their money back so let's no ask them to verify their own signature and complete a trade
@@ -494,19 +506,21 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             "amount in the first new commitment needs to match amount locked",
         );
         // rest of the commitments hashes made should be fake
-        maker_new_commit_hash =
-            hash_fake_commitment(inputs.spend_commitments_and_roots[1].shared_nonce);
+        maker_new_commit_hash = hash_fake_commitment(inputs.recipient_commitments[1].shared_nonce);
         taker_change_commit_hash =
-            hash_fake_commitment(inputs.spend_commitments_and_roots[2].shared_nonce);
-        taker_new_commit_hash =
-            hash_fake_commitment(inputs.spend_commitments_and_roots[3].shared_nonce);
+            hash_fake_commitment(inputs.recipient_commitments[2].shared_nonce);
+        taker_new_commit_hash = hash_fake_commitment(inputs.recipient_commitments[3].shared_nonce);
     } else {
+        assert(
+            inputs.actual_amount_recipient_commitments == 4,
+            "A swaptoad fill can only create 4 new real commitment, rest needs to be fake!!",
+        );
         let taker_spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[1];
         let signed_order: SwapToadOrder = SwapToadOrder {
-            maker_asset_id: inputs.auth_sig_inputs[0],
-            maker_amount: inputs.auth_sig_inputs[1],
-            taker_asset_id: inputs.auth_sig_inputs[2],
-            taker_amount: inputs.auth_sig_inputs[3],
+            listing_asset_id: inputs.auth_sig_inputs[0],
+            listing_amount: inputs.auth_sig_inputs[1],
+            payment_asset_id: inputs.auth_sig_inputs[2],
+            payment_amount: inputs.auth_sig_inputs[3],
             expiry: inputs.auth_sig_inputs[4],
             // TODO we need 2 messages, for maker_change_commit and taker_change_commit
             first_message_hash: inputs.auth_sig_inputs[5],
@@ -535,17 +549,38 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
         // don't get it mixed up!
         // maker sells asset_A for asset_B
         // if anything left over gets asset_A as change and asset_B as new commitment
+        // new---
         assert(
-            maker_new_commit.asset_id == signed_order.taker_asset_id,
-            "maker_new_commit asset_id mismatch with asset_id in signed_order.taker_asset_id",
+            maker_new_commit.asset_id == signed_order.payment_asset_id,
+            "maker_new_commit asset_id mismatch with asset_id in signed_order.payment_asset_id",
+        );
+        // taker is doing the filling, and he should not mess with makers change and swap out asset_ids!
+        // before if/else block this is always checked with locked_commitment and locked_commitment is checked against signed order
+        // assert(
+        //     maker_change_commit.asset_id == signed_order.listing_asset_id,
+        //     "maker_change_commit asset_id mismatch with asset_id in signed_order.listing_asset_id",
+        // );
+        assert(
+            taker_change_commit.asset_id == signed_order.payment_asset_id,
+            "taker_change_commit asset_id mismatch with asset_id in signed_order.payment_asset_id",
         );
         assert(
-            taker_change_commit.asset_id == signed_order.taker_asset_id,
-            "taker_change_commit asset_id mismatch with asset_id in signed_order.taker_asset_id",
+            taker_new_commit.asset_id == signed_order.listing_asset_id,
+            "taker_new_commit asset_id mismatch with asset_id in signed_order.listing_asset_id",
+        );
+
+        //spend --
+        assert(
+            locked_commitment.asset_id == signed_order.listing_asset_id,
+            "locked_commitment asset_id must match listing_asset_id of signed order",
         );
         assert(
-            taker_new_commit.asset_id == signed_order.maker_asset_id,
-            "taker_new_commit asset_id mismatch with asset_id in signed_order.maker_asset_id",
+            taker_spend_commitment.asset_id == signed_order.payment_asset_id,
+            "taker_spend_commitment asset_id must match payment_asset_id of signed order",
+        );
+        assert(
+            taker_spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
+            "Only a join split commitment can fill a trade with taker_spend_commitment",
         );
 
         // maker needs to be sure their new commiments build by taker are build properly
@@ -596,29 +631,30 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
 
         // amounts
         assert(
-            maker_new_commit.amount == signed_order.maker_amount,
+            maker_new_commit.amount == signed_order.payment_amount,
             "maker_new_commit.amount mismatch",
         );
         assert(
-            taker_new_commit.amount == signed_order.taker_amount,
+            taker_new_commit.amount == signed_order.listing_amount,
             "taker_new_commit.amount mismatch",
         );
         assert(
-            maker_change_commit.amount == locked_commitment.amount - signed_order.maker_amount,
-            "maker_new_commit.amount mismatch",
+            maker_change_commit.amount == locked_commitment.amount - signed_order.listing_amount,
+            "maker_change_commit.amount mismatch",
         );
         assert(
-            taker_change_commit.amount == taker_spend_commitment.amount - signed_order.taker_amount,
-            "taker_new_commit.amount mismatch",
+            taker_change_commit.amount
+                == taker_spend_commitment.amount - signed_order.payment_amount,
+            "taker_change_commit.amount mismatch",
         );
 
         // balance checks on the 2 commitments being spend
         assert(
-            taker_new_commit.amount.lt(locked_commitment.amount),
+            greater_or_equal(locked_commitment.amount, taker_new_commit.amount),
             "taker is taking more tokens then there are in the locked commitments",
         );
         assert(
-            maker_new_commit.amount.lt(taker_spend_commitment.amount),
+            greater_or_equal(taker_spend_commitment.amount, maker_new_commit.amount),
             "maker is recieving more tokens then taker has in their taker_spend_commitment",
         );
 
@@ -630,11 +666,25 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             "taker_spend_commitment is not spendable with this owner_signature",
         );
         taker_spend_nullfier = hash_nullifier(
-            inputs.owner_hash,
+            inputs.nullifier_secret,
             taker_spend_commitment.giga_leaf_index,
             taker_spend_commitment.local_leaf_index,
         );
 
+        // makers commitments are special, since taker is creating them on their behalve
+        // so we alse check the pre_commitment!
+
+        // TODO make this a function. "constrain_pre_commit()
+        assert(
+            maker_new_commit.pre_commitment_hash
+                == hash_pre_commitment(
+                    maker_new_commit.owner_hash,
+                    maker_new_commit.shared_nonce,
+                    maker_new_commit.circuit_comp_selector,
+                    hash_circuit_component_storage(maker_new_commit.circuit_comp_input),
+                ),
+            "maker_new_commit.pre_commitment_hash mismath with hashed values on fill",
+        );
         maker_new_commit_hash = hash_commitment(
             maker_new_commit.pre_commitment_hash,
             maker_new_commit.asset_id,
