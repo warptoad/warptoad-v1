@@ -114,8 +114,8 @@ rm -rf ~/.aztec
 
 # deployments
 
-warptoad: [0x49A549C7aC6A79567240e39870B509005d18b5b6](https://sepolia.etherscan.io/address/0x49A549C7aC6A79567240e39870B509005d18b5b6)  
-wrapperFactory: [0x1aa30A44d55ff4126F9d316e8d2E91BF8202fC3A](https://sepolia.etherscan.io/address/0x1aa30A44d55ff4126F9d316e8d2E91BF8202fC3A)  
-verifier: [0x372324B18395C52995E93Baf9592EC7910A92436](https://sepolia.etherscan.io/address/0x372324B18395C52995E93Baf9592EC7910A92436)  
-chainConfig: [0x8E0EDF630b3E51d97f21A526d778c5A075D86afc](https://sepolia.etherscan.io/address/0x8E0EDF630b3E51d97f21A526d778c5A075D86afc)  
+warptoad: [0x32572A5bAd031B37A260ccDCBd8F2533181f4B61](https://sepolia.etherscan.io/address/0x32572A5bAd031B37A260ccDCBd8F2533181f4B61)  
+wrapperFactory: [0xc7DaF4234ADee80c054C6dD93b8a3DA0E2BD2685](https://sepolia.etherscan.io/address/0xc7DaF4234ADee80c054C6dD93b8a3DA0E2BD2685)  
+verifier: [0xC5F6941835866d1FbEFB7E6767B2C853941CCBA8](https://sepolia.etherscan.io/address/0xC5F6941835866d1FbEFB7E6767B2C853941CCBA8)  
+chainConfig: [0xC99Ab7737bC1d37A3B4722E82c11fE8d563991eD](https://sepolia.etherscan.io/address/0xC99Ab7737bC1d37A3B4722E82c11fE8d563991eD)  
 skinnyIMTPoseidon2WriteStorage: [0x00000066C760D24272a9E8A424EF7233A0F0da83](https://sepolia.etherscan.io/address/0x00000066C760D24272a9E8A424EF7233A0F0da83)
