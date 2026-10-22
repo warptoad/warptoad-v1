@@ -28,7 +28,9 @@ Secrets go in the hardhat keystore once (plain env vars with the same names also
 
 ```sh
 npx hardhat keystore set SEPOLIA_RPC_URL
-npx hardhat keystore set SEPOLIA_PRIVATE_KEY
+npx hardhat keystore set SEPOLIA_PRIVATE_KEY          # deployer, also relays the shielded txs in the live tests
+npx hardhat keystore set SEPOLIA_ALICE_PRIVATE_KEY    # alice and bob: separate EOAs for the live tests, so etherscan
+npx hardhat keystore set SEPOLIA_BOB_PRIVATE_KEY      # shows three parties. The tests top them up with gas from the deployer
 npx hardhat keystore set ETHERSCAN_API_KEY
 ```
 
@@ -53,12 +55,13 @@ Wrapper tokens are deployed by `WrapperFactory` on first wrap, so they might not
 verified. In case you need one verified do:
 
 ```sh
-pnpm verify:wrapper:sepolia 0xfc632092084235675bebe56263976397959a0ff7
+pnpm verify:wrapper:sepolia 0xDDC81Fb1123eE927FFCadAD2367b4aAC75CE6F11
 ```
 
-Run test on sepolia
+Run tests on sepolia (`run`, not `test`: the test task can't unlock the keystore)
 ```sh
-pnpm hardhat run test/ClaudeLilMessaging.test.ts --network sepolia
+pnpm hardhat run test/ClaudeLilMessaging.test.ts --network sepolia   # shield, shielded tx, unshield
+pnpm hardhat run test/ClaudesLilSwapToad.test.ts --network sepolia   # swaptoad lock, cancel, fill
 ```
 
 ## Circuits

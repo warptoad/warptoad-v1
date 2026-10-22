@@ -16,7 +16,8 @@
  *   pnpm hardhat run test/ClaudeLilMessaging.test.ts --network sepolia
  * `run` and not `test`: the test task refuses to unlock the password protected keystore, `run` prompts for it.
  * Warptoad, the factory and the verifier come from ignition/deployments/chain-<id>/, only a MockERC20 gets deployed.
- * Alice and bob are both the one configured account, and nonces are randomised so reruns don't collide
+ * Alice and bob are the second and third configured accounts (the deployer tops them up with gas), and nonces are
+ * randomised so reruns don't collide
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
@@ -59,7 +60,7 @@ import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { Barretenberg, UltraHonkBackend } from "@aztec/bb.js";
 import { getAddress, type Address, type Hex } from "viem";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
-import { deployInfra, deployWarptoad, wrap, ZERO_ADDRESS } from "./fixtures.js";
+import { deployInfra, deployWarptoad, fundIfLow, wrap, ZERO_ADDRESS } from "./fixtures.js";
 
 const noUnshieldCommitment = { recipient: 0n, amount: 0n, assetId: 0n };
 const noTarget = { wrapperFactory: ZERO_ADDRESS, wrapperArgs: "0x" as Hex };
@@ -75,7 +76,7 @@ const { derivePublicKey, signMessage } = createRequire(import.meta.url)("@zk-kit
 describe("ClaudeLilMessaging", async function () {
     const { viem } = await network.create();
     const publicClient = await viem.getPublicClient();
-    // a live network config has one key, so alice and bob are both the deployer there
+    // the live network config has three keys, see hardhat.config.ts. A config with fewer falls back to the deployer
     const [deployer, aliceWallet = deployer, bobWallet = deployer] = await viem.getWalletClients();
     const chainId = await publicClient.getChainId();
     const live = chainId !== 31337;
@@ -135,6 +136,8 @@ describe("ClaudeLilMessaging", async function () {
             const deployed = JSON.parse(await readFile(`ignition/deployments/chain-${chainId}/deployed_addresses.json`, "utf8"));
             warptoad = await viem.getContractAt("Warptoad", deployed["Warptoad#Warptoad"]);
             factory = await viem.getContractAt("WrapperFactory", deployed["Warptoad#WrapperFactory"]);
+            await fundIfLow(publicClient, deployer, aliceWallet.account.address);
+            await fundIfLow(publicClient, deployer, bobWallet.account.address);
         } else {
             ({ warptoad, factory } = await deployWarptoad(viem, await deployInfra(viem, publicClient, deployer)));
         }

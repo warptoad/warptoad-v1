@@ -47,7 +47,13 @@ export default defineConfig({
       type: "http",
       chainType: "l1",
       url: configVariable("SEPOLIA_RPC_URL"),
-      accounts: [configVariable("SEPOLIA_PRIVATE_KEY")],
+      // deployer first: ignition and relaying use it. Alice and bob are separate EOAs so the live test runs read
+      // as three parties on etherscan, the tests top them up with gas from the deployer
+      accounts: [
+        configVariable("SEPOLIA_PRIVATE_KEY"),
+        configVariable("SEPOLIA_ALICE_PRIVATE_KEY"),
+        configVariable("SEPOLIA_BOB_PRIVATE_KEY"),
+      ],
     },
   },
   verify: {

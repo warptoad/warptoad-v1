@@ -5,21 +5,29 @@
  *   2. alice cancels the first lock: no order signature, the 400 come back to her as a plain note
  *   3. alice signs an order on the second lock (300 USDC for 200 DAI) and bob fills it: 4 new notes,
  *      bob builds alice's two from the lock's shared secret
+ *   4. alice unshields the 200 DAI bob made for her and unwraps it, bob does the same with his 300 USDC
  *
  * A lock is a note with circuit_comp_selector = SWAP_TOAD_SELECTOR and, in circuit_comp_storage, the pubkey that
  * signs orders on it plus a shared nullifier secret. The lock is nullified with that secret, not the owner's, so
  * whoever gets the secret with the order can spend the lock, but only the way the order says.
  *
  * Same setup as ClaudesLilHappyPath: no encrypted blobs, secrets just pasted around. Needs `pnpm noir` first
+ *
+ * Also runs against a real deployment, same as ClaudeLilMessaging (see README, Deploy):
+ *   pnpm hardhat run test/ClaudesLilSwapToad.test.ts --network sepolia
+ * Warptoad and the factory come from ignition/deployments/chain-<id>/, alice and bob are the second and third
+ * configured accounts (the deployer tops them up with gas), and nonces and lock secrets are randomised so reruns
+ * don't collide
  */
 import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
+import { readFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { cpus } from "node:os";
 import { network } from "hardhat";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
-import type { Asset, Note } from "../src/types.js";
-import { SWAP_TOAD_SELECTOR } from "../src/constants.js";
+import type { Asset, Note, WarptoadContract, WrapperERC20Contract, WrapperFactoryContract } from "../src/types.js";
+import { JOIN_SPLIT_SELECTOR, SWAP_TOAD_SELECTOR } from "../src/constants.js";
 import {
     hashAssetId,
     hashCircuitComponentAuthSig,
@@ -47,20 +55,25 @@ import {
     recipientInput,
     spendInput,
     syncedTree,
+    unshieldInput,
 } from "../src/proving.js";
 import { assetOf, encodeWrapperArgs } from "../src/assets.js";
 import { publicHashOf } from "../src/messages.js";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { Barretenberg, UltraHonkBackend } from "@aztec/bb.js";
-import type { Hex } from "viem";
+import type { Address, Hex } from "viem";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
-import { deployInfra, deployWarptoad, wrap, ZERO_ADDRESS, type Deployment } from "./fixtures.js";
+import { deployInfra, deployWarptoad, fundIfLow, wrap, ZERO_ADDRESS, type WalletClient } from "./fixtures.js";
 
 const NO_MESSAGES: Hex[] = ["0x", "0x", "0x", "0x"];
 const { publicHash: PUBLIC_HASH, firstMessageHash: FIRST_MESSAGE_HASH } = publicHashOf(NO_MESSAGES);
 const noTarget = { wrapperFactory: ZERO_ADDRESS, wrapperArgs: "0x" as Hex };
 const noUnshieldCommitment = { recipient: 0n, amount: 0n, assetId: 0n };
+/** MockERC20s to reuse on a live chain, anyone can mint them. A missing one gets deployed and its address printed */
+const MOCK_TOKENS: Record<number, { USDC?: Address; DAI?: Address }> = {
+    11155111: { USDC: "0x5afC539F572A1C4CF4c7FcC4ef3169c232F9c0E4" },
+};
 const { derivePublicKey, signMessage } = createRequire(import.meta.url)("@zk-kit/eddsa-poseidon") as {
     derivePublicKey: typeof DerivePublicKey;
     signMessage: typeof SignMessage;
@@ -69,19 +82,36 @@ const { derivePublicKey, signMessage } = createRequire(import.meta.url)("@zk-kit
 describe("ClaudesLilSwapToad", async function () {
     const { viem } = await network.create();
     const publicClient = await viem.getPublicClient();
-    const [deployer, aliceWallet, bobWallet] = await viem.getWalletClients();
+    // the live network config has three keys, see hardhat.config.ts. A config with fewer falls back to the deployer
+    const [deployer, aliceWallet = deployer, bobWallet = deployer] = await viem.getWalletClients();
+    const chainId = await publicClient.getChainId();
+    const live = chainId !== 31337;
+    // fake nullifiers, fake commitments and lock secrets are hashed into leaves and nullifiers, so every live run needs fresh ones
+    const nonceBase = live ? BigInt(Date.now()) << 16n : 0n;
+    function nonce(i: number) {
+        return nonceBase + BigInt(i);
+    }
+    // hardhat-viem's write returns as soon as the tx is sent, a live chain needs the receipt before the next step
+    async function send(tx: Promise<Hex>) {
+        const hash = await tx;
+        if (live) await publicClient.waitForTransactionReceipt({ hash });
+        return hash;
+    }
 
-    let d: Deployment;
+    let warptoad: WarptoadContract;
+    let factory: WrapperFactoryContract;
     let usdc: ContractReturnType<"MockERC20">;
     let dai: ContractReturnType<"MockERC20">;
+    let usdcWrapper: WrapperERC20Contract;
+    let daiWrapper: WrapperERC20Contract;
     let bb: Barretenberg;
     let backend: UltraHonkBackend;
     let treeId: bigint;
+    let gigaIndex: bigint;
     let usdcAsset: Asset;
     let usdcId: bigint;
     let daiAsset: Asset;
     let daiId: bigint;
-    const gigaIndex = 0n;
 
     // alice signs orders with a key of its own, the lock stores its pubkey. Bob never needs one, he only fills
     const alice = {
@@ -100,20 +130,10 @@ describe("ClaudesLilSwapToad", async function () {
         ownerKeysHash: 0n,
         ownerHash: 0n,
     };
-    for (const who of [alice, bob]) {
-        const [x, y] = derivePublicKey(who.eddsaKey);
-        who.pubKey = { x, y };
-        who.ownerKeysHash = hashOwnerKeys({ spendPubKey: who.pubKey, nullifierSecret: who.nullifierSecret });
-        who.ownerHash = hashOwner({ ownerKeysHash: who.ownerKeysHash, gigaIndex });
-    }
-    {
-        const [x, y] = derivePublicKey(alice.orderKey);
-        alice.orderPubKey = { x, y };
-    }
 
     // one shared secret per lock: it nullifies the lock and seeds the nonces of the maker's notes on a fill
-    const cancelLockSecret = 0x5ec1n;
-    const fillLockSecret = 0x5ec2n;
+    const cancelLockSecret = nonce(0x5ec1);
+    const fillLockSecret = nonce(0x5ec2);
     function lockStorage(sharedNullifierSecret: bigint): CircuitCompStorage {
         return [alice.orderPubKey.x, alice.orderPubKey.y, sharedNullifierSecret];
     }
@@ -121,10 +141,13 @@ describe("ClaudesLilSwapToad", async function () {
     let cancelLock: Note;
     let fillLock: Note;
     let bobDai: Note;
+    // what the fill leaves them with, unshielded in step 4
+    let alicePayment: Note;
+    let bobUsdc: Note;
 
     async function tree() {
-        const expectedRoot = await d.warptoad.read.getSkinnyRoot([treeId]);
-        return syncedTree(d.warptoad.address, publicClient, treeId, { expectedRoot });
+        const expectedRoot = await warptoad.read.getSkinnyRoot([treeId]);
+        return syncedTree(warptoad.address, publicClient, treeId, { expectedRoot });
     }
 
     async function timeStamps() {
@@ -132,17 +155,48 @@ describe("ClaudesLilSwapToad", async function () {
         return { proof_expire_time_stamp: now + 3600n, historic_time_stamp: now - 3600n };
     }
 
-    before(async () => {
-        d = await deployWarptoad(viem, await deployInfra(viem, publicClient, deployer));
-        assert.equal(d.gigaIndex, gigaIndex, "the local chain config puts hardhat at giga index 0");
-        treeId = await d.warptoad.read.commitmentTreeId();
+    async function mockToken(symbol: "USDC" | "DAI", name: string, decimals: number, holder: Address) {
+        const known = MOCK_TOKENS[chainId]?.[symbol];
+        let token: ContractReturnType<"MockERC20">;
+        if (known !== undefined) {
+            token = await viem.getContractAt("MockERC20", known);
+        } else {
+            token = await viem.deployContract("MockERC20", [name, symbol, decimals]);
+            if (live) console.log(`deployed MockERC20 ${symbol} at ${token.address}, add it to MOCK_TOKENS to reuse it`);
+        }
+        await send(token.write.mint([holder, 1000n]));
+        await send(token.write.approve([factory.address, 1000n], { account: holder }));
+        return token;
+    }
 
-        usdc = await viem.deployContract("MockERC20", ["USD Coin", "USDC", 6]);
-        await usdc.write.mint([aliceWallet.account.address, 1000n]);
-        await usdc.write.approve([d.factory.address, 1000n], { account: aliceWallet.account });
-        dai = await viem.deployContract("MockERC20", ["Dai Stablecoin", "DAI", 18]);
-        await dai.write.mint([bobWallet.account.address, 1000n]);
-        await dai.write.approve([d.factory.address, 1000n], { account: bobWallet.account });
+    before(async () => {
+        if (live) {
+            const deployed = JSON.parse(await readFile(`ignition/deployments/chain-${chainId}/deployed_addresses.json`, "utf8"));
+            warptoad = await viem.getContractAt("Warptoad", deployed["Warptoad#Warptoad"]);
+            factory = await viem.getContractAt("WrapperFactory", deployed["Warptoad#WrapperFactory"]);
+        } else {
+            ({ warptoad, factory } = await deployWarptoad(viem, await deployInfra(viem, publicClient, deployer)));
+        }
+        treeId = await warptoad.read.commitmentTreeId();
+        // owner hashes are bound to the chain they can be spent on, so they wait for the contract's giga index
+        gigaIndex = BigInt(await warptoad.read.gigaIndex());
+        for (const who of [alice, bob]) {
+            const [x, y] = derivePublicKey(who.eddsaKey);
+            who.pubKey = { x, y };
+            who.ownerKeysHash = hashOwnerKeys({ spendPubKey: who.pubKey, nullifierSecret: who.nullifierSecret });
+            who.ownerHash = hashOwner({ ownerKeysHash: who.ownerKeysHash, gigaIndex });
+        }
+        {
+            const [x, y] = derivePublicKey(alice.orderKey);
+            alice.orderPubKey = { x, y };
+        }
+
+        if (live) {
+            await fundIfLow(publicClient, deployer, aliceWallet.account.address);
+            await fundIfLow(publicClient, deployer, bobWallet.account.address);
+        }
+        usdc = await mockToken("USDC", "USD Coin", 6, aliceWallet.account.address);
+        dai = await mockToken("DAI", "Dai Stablecoin", 18, bobWallet.account.address);
 
         bb = await Barretenberg.new({ threads: cpus().length });
         backend = new UltraHonkBackend(circuit.bytecode, bb);
@@ -153,36 +207,38 @@ describe("ClaudesLilSwapToad", async function () {
     });
 
     it("1. alice locks 400 USDC twice, bob shields 500 DAI", async () => {
-        const usdcWrapper = await wrap(viem, d, usdc.address, 1000n, aliceWallet.account.address, aliceWallet.account.address);
-        const daiWrapper = await wrap(viem, d, dai.address, 1000n, bobWallet.account.address, bobWallet.account.address);
-        const [firstGigaIndex, lastGigaIndex] = await d.factory.read.gigaIndexRange();
-        usdcAsset = assetOf({ wrapperFactory: d.factory.address, wrapper: usdcWrapper.address, underlying: usdc.address, firstGigaIndex, lastGigaIndex });
-        daiAsset = assetOf({ wrapperFactory: d.factory.address, wrapper: daiWrapper.address, underlying: dai.address, firstGigaIndex, lastGigaIndex });
+        usdcWrapper = await wrap(viem, { factory, gigaIndex }, usdc.address, 1000n, aliceWallet.account.address, aliceWallet.account.address);
+        daiWrapper = await wrap(viem, { factory, gigaIndex }, dai.address, 1000n, bobWallet.account.address, bobWallet.account.address);
+        const [firstGigaIndex, lastGigaIndex] = await factory.read.gigaIndexRange();
+        usdcAsset = assetOf({ wrapperFactory: factory.address, wrapper: usdcWrapper.address, underlying: usdc.address, firstGigaIndex, lastGigaIndex });
+        daiAsset = assetOf({ wrapperFactory: factory.address, wrapper: daiWrapper.address, underlying: dai.address, firstGigaIndex, lastGigaIndex });
         usdcId = hashAssetId(usdcAsset);
         daiId = hashAssetId(daiAsset);
 
         cancelLock = {
             ownerHash: alice.ownerHash,
-            sharedNonce: 1001n,
+            sharedNonce: nonce(1001),
             assetId: usdcId,
             amount: 400n,
             circuitCompSelector: SWAP_TOAD_SELECTOR,
             circuitCompStorage: lockStorage(cancelLockSecret),
         };
-        fillLock = { ...cancelLock, sharedNonce: 1002n, circuitCompStorage: lockStorage(fillLockSecret) };
-        bobDai = { ownerHash: bob.ownerHash, sharedNonce: 1003n, assetId: daiId, amount: 500n };
+        fillLock = { ...cancelLock, sharedNonce: nonce(1002), circuitCompStorage: lockStorage(fillLockSecret) };
+        bobDai = { ownerHash: bob.ownerHash, sharedNonce: nonce(1003), assetId: daiId, amount: 500n };
 
         // shield takes any pre_commitment_hash, so a lock can be made straight from a wrapper balance
+        const aliceUsdcBefore = await usdcWrapper.read.balanceOf([aliceWallet.account.address]);
+        const bobDaiBefore = await daiWrapper.read.balanceOf([bobWallet.account.address]);
         const usdcArgs = encodeWrapperArgs({ wrapper: usdcWrapper.address, underlying: usdc.address });
         for (const lock of [cancelLock, fillLock]) {
-            await d.warptoad.write.shield([d.factory.address, preCommitmentHashOf(lock), lock.amount, usdcArgs, "0x"], { account: aliceWallet.account });
+            await send(warptoad.write.shield([factory.address, preCommitmentHashOf(lock), lock.amount, usdcArgs, "0x"], { account: aliceWallet.account }));
         }
         const daiArgs = encodeWrapperArgs({ wrapper: daiWrapper.address, underlying: dai.address });
-        await d.warptoad.write.shield([d.factory.address, preCommitmentHashOf(bobDai), 500n, daiArgs, "0x"], { account: bobWallet.account });
+        await send(warptoad.write.shield([factory.address, preCommitmentHashOf(bobDai), 500n, daiArgs, "0x"], { account: bobWallet.account }));
 
-        assert.equal(await usdcWrapper.read.balanceOf([aliceWallet.account.address]), 200n);
-        assert.equal(await daiWrapper.read.balanceOf([bobWallet.account.address]), 500n);
-        assert.deepEqual((await tree()).leaves, [cancelLock, fillLock, bobDai].map(hashNote));
+        assert.equal(await usdcWrapper.read.balanceOf([aliceWallet.account.address]), aliceUsdcBefore - 800n);
+        assert.equal(await daiWrapper.read.balanceOf([bobWallet.account.address]), bobDaiBefore - 500n);
+        assert.deepEqual((await tree()).leaves.slice(-3), [cancelLock, fillLock, bobDai].map(hashNote));
     });
 
     it("2. alice cancels a lock without an order signature, the 400 come back as a plain note", async () => {
@@ -190,20 +246,20 @@ describe("ClaudesLilSwapToad", async function () {
         const { proof: lockProof, edgeIndex } = merkleProofInput(localTree, hashNote(cancelLock));
 
         // the only real new note: same asset and amount as the lock, the circuit checks nothing else about it
-        const refund: Note = { ownerHash: alice.ownerHash, sharedNonce: 2001n, assetId: usdcId, amount: 400n };
-        const recipients = [refund, fakeNote(2002n), fakeNote(2003n), fakeNote(2004n)];
+        const refund: Note = { ownerHash: alice.ownerHash, sharedNonce: nonce(2001), assetId: usdcId, amount: 400n };
+        const recipients = [refund, fakeNote(nonce(2002)), fakeNote(nonce(2003)), fakeNote(nonce(2004))];
         const recipientHashes = [
             hashNote(refund),
-            hashFakeCommitment({ nonce: 2002n }),
-            hashFakeCommitment({ nonce: 2003n }),
-            hashFakeCommitment({ nonce: 2004n }),
+            hashFakeCommitment({ nonce: nonce(2002) }),
+            hashFakeCommitment({ nonce: nonce(2003) }),
+            hashFakeCommitment({ nonce: nonce(2004) }),
         ] as CircuitSizeFields;
         // the lock is nullified with its shared secret, not alice's own, so a cancel and a fill spend the same nullifier
         const nullifiers = [
             hashNullifier({ nullifierSecret: cancelLockSecret, gigaLeafIndex: gigaIndex, localLeafIndex: lockProof.index }),
-            hashFakeNullifier({ nonce: 2005n }),
-            hashFakeNullifier({ nonce: 2006n }),
-            hashFakeNullifier({ nonce: 2007n }),
+            hashFakeNullifier({ nonce: nonce(2005) }),
+            hashFakeNullifier({ nonce: nonce(2006) }),
+            hashFakeNullifier({ nonce: nonce(2007) }),
         ] as CircuitSizeFields;
         const sigHash = hashSpendSignatureInputs({
             publicHash: PUBLIC_HASH,
@@ -230,9 +286,9 @@ describe("ClaudesLilSwapToad", async function () {
                 actual_amount_recipient_commitments: 1,
                 spend_commitments: [
                     spendInput(cancelLock, usdcAsset, lockProof, edgeIndex),
-                    fakeSpendInput(2005n),
-                    fakeSpendInput(2006n),
-                    fakeSpendInput(2007n),
+                    fakeSpendInput(nonce(2005)),
+                    fakeSpendInput(nonce(2006)),
+                    fakeSpendInput(nonce(2007)),
                 ],
                 actual_amount_spend_commitments: 1,
                 owner: {
@@ -257,10 +313,10 @@ describe("ClaudesLilSwapToad", async function () {
             publicHash: PUBLIC_HASH,
             proof,
         };
-        await d.warptoad.write.transactPrivate([tx]);
+        await send(warptoad.write.transactPrivate([tx]));
 
-        assert.equal(await d.warptoad.read.nullifiers([nullifiers[0]]) > 0n, true, "the lock is spent");
-        assert.deepEqual((await tree()).leaves, [...localTree.leaves, ...recipientHashes]);
+        assert.equal(await warptoad.read.nullifiers([nullifiers[0]]) > 0n, true, "the lock is spent");
+        assert.deepEqual((await tree()).leaves.slice(-4), recipientHashes);
     });
 
     it("3. bob fills alice's order: 300 of the locked USDC for 200 DAI", async () => {
@@ -271,7 +327,7 @@ describe("ClaudesLilSwapToad", async function () {
 
         // ---- alice's side, all of it before bob shows up: the order, and the two notes bob will make for her.
         // their nonces come from the lock's secret so bob can't pick them, type 0 is the payment, 1 the change
-        const alicePayment: Note = {
+        alicePayment = {
             ownerHash: alice.ownerHash,
             sharedNonce: hashSharedNonceSwaptoad({ sharedNullifierSecret: fillLockSecret, commitmentType: 0n }),
             assetId: daiId,
@@ -299,16 +355,16 @@ describe("ClaudesLilSwapToad", async function () {
         const orderSig = signMessage(alice.orderKey, hashCircuitComponentAuthSig({ authSigInputs: order }));
 
         // ---- bob's side: alice handed him the order, its signature and fillLockSecret
-        const bobChange: Note = { ownerHash: bob.ownerHash, sharedNonce: 3001n, assetId: daiId, amount: 300n };
-        const bobUsdc: Note = { ownerHash: bob.ownerHash, sharedNonce: 3002n, assetId: usdcId, amount: 300n };
+        const bobChange: Note = { ownerHash: bob.ownerHash, sharedNonce: nonce(3001), assetId: daiId, amount: 300n };
+        bobUsdc = { ownerHash: bob.ownerHash, sharedNonce: nonce(3002), assetId: usdcId, amount: 300n };
         // slot order is fixed by the circuit: maker change, maker payment, taker change, taker payment
         const recipients = [aliceChange, alicePayment, bobChange, bobUsdc];
         const recipientHashes = recipients.map(hashNote) as CircuitSizeFields;
         const nullifiers = [
             hashNullifier({ nullifierSecret: fillLockSecret, gigaLeafIndex: gigaIndex, localLeafIndex: lockProof.index }),
             hashNullifier({ nullifierSecret: bob.nullifierSecret, gigaLeafIndex: gigaIndex, localLeafIndex: daiProof.index }),
-            hashFakeNullifier({ nonce: 3003n }),
-            hashFakeNullifier({ nonce: 3004n }),
+            hashFakeNullifier({ nonce: nonce(3003) }),
+            hashFakeNullifier({ nonce: nonce(3004) }),
         ] as CircuitSizeFields;
         const sigHash = hashSpendSignatureInputs({
             publicHash: PUBLIC_HASH,
@@ -335,8 +391,8 @@ describe("ClaudesLilSwapToad", async function () {
                 spend_commitments: [
                     spendInput(fillLock, usdcAsset, lockProof, edgeIndex),
                     spendInput(bobDai, daiAsset, daiProof, edgeIndex),
-                    fakeSpendInput(3003n),
-                    fakeSpendInput(3004n),
+                    fakeSpendInput(nonce(3003)),
+                    fakeSpendInput(nonce(3004)),
                 ],
                 actual_amount_spend_commitments: 2,
                 // bob owns the second spend and signs the tx, alice's order signature authorises the first
@@ -365,12 +421,114 @@ describe("ClaudesLilSwapToad", async function () {
             publicHash: PUBLIC_HASH,
             proof,
         };
-        await d.warptoad.write.transactPrivate([tx]);
+        await send(warptoad.write.transactPrivate([tx]));
 
-        assert.equal(await d.warptoad.read.nullifiers([nullifiers[0]]) > 0n, true, "the lock is spent");
-        assert.equal(await d.warptoad.read.nullifiers([nullifiers[1]]) > 0n, true, "bob's DAI note is spent");
-        assert.deepEqual((await tree()).leaves, [...localTree.leaves, ...recipientHashes]);
+        assert.equal(await warptoad.read.nullifiers([nullifiers[0]]) > 0n, true, "the lock is spent");
+        assert.equal(await warptoad.read.nullifiers([nullifiers[1]]) > 0n, true, "bob's DAI note is spent");
+        assert.deepEqual((await tree()).leaves.slice(-4), recipientHashes);
         // the lock can't be filled twice
-        await assert.rejects(d.warptoad.write.transactPrivate([tx]), /NullifierAlreadySpent/);
+        await assert.rejects(warptoad.write.transactPrivate([tx]), /NullifierAlreadySpent/);
+    });
+
+    /**
+     * a plain join_split unshield of `note` to `wallet`'s address, relayed by the deployer, then `wallet` unwraps
+     * it on the factory. Same shape as step 3 of ClaudesLilHappyPath. `n` is the nonce base for this tx's fakes
+     */
+    async function unshieldAndUnwrap(
+        note: Note,
+        asset: Asset,
+        owner: { eddsaKey: string; nullifierSecret: bigint; pubKey: { x: bigint; y: bigint } },
+        wallet: WalletClient,
+        wrapper: WrapperERC20Contract,
+        token: ContractReturnType<"MockERC20">,
+        n: number,
+    ) {
+        const localTree = await tree();
+        const { proof: localProof, edgeIndex } = merkleProofInput(localTree, hashNote(note));
+        const recipient = wallet.account.address;
+
+        // an unshield is a recipient note whose owner hash is the eth address, unshields have to come first
+        const unshieldNote: Note = { ownerHash: BigInt(recipient), sharedNonce: 0n, assetId: note.assetId, amount: note.amount };
+        const recipients = [unshieldNote, fakeNote(nonce(n + 1)), fakeNote(nonce(n + 2)), fakeNote(nonce(n + 3))];
+        const recipientHashes = [
+            hashNote(unshieldNote),
+            hashFakeCommitment({ nonce: nonce(n + 1) }),
+            hashFakeCommitment({ nonce: nonce(n + 2) }),
+            hashFakeCommitment({ nonce: nonce(n + 3) }),
+        ] as CircuitSizeFields;
+        const nullifiers = [
+            hashNullifier({ nullifierSecret: owner.nullifierSecret, gigaLeafIndex: gigaIndex, localLeafIndex: localProof.index }),
+            hashFakeNullifier({ nonce: nonce(n + 4) }),
+            hashFakeNullifier({ nonce: nonce(n + 5) }),
+            hashFakeNullifier({ nonce: nonce(n + 6) }),
+        ] as CircuitSizeFields;
+        const sigHash = hashSpendSignatureInputs({
+            publicHash: PUBLIC_HASH,
+            spendCommitmentHashes: [hashNote(note), 0n, 0n, 0n],
+            recipientCommitmentHashes: recipientHashes,
+        });
+        const sig = signMessage(owner.eddsaKey, sigHash);
+
+        const ts = await timeStamps();
+        const { proof } = await prove(backend, circuit as CompiledCircuit, {
+            pub_in: {
+                roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
+                time_stamps: ts,
+                public_hash: PUBLIC_HASH,
+                first_message_hash: FIRST_MESSAGE_HASH,
+                unshielding_commitments: [unshieldInput(recipient, note.assetId, note.amount), noUnshield(), noUnshield(), noUnshield()],
+                nullifiers,
+                recipient_commitments_hashes: recipientHashes,
+            },
+            priv_in: {
+                recipient_commitments: recipients.map(function (r) {
+                    return recipientInput(r);
+                }),
+                actual_amount_recipient_commitments: 1,
+                spend_commitments: [
+                    spendInput(note, asset, localProof, edgeIndex),
+                    fakeSpendInput(nonce(n + 4)),
+                    fakeSpendInput(nonce(n + 5)),
+                    fakeSpendInput(nonce(n + 6)),
+                ],
+                actual_amount_spend_commitments: 1,
+                owner: {
+                    pub_key: owner.pubKey,
+                    nullifier_secret: owner.nullifierSecret,
+                    signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
+                },
+                auth: noAuth(),
+                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
+            },
+        });
+
+        const underlying = await wrapper.read.underlying();
+        const tx = {
+            roots: { localRoot: localTree.root, localEdgeIndex: edgeIndex, gigaRoot: 0n, gigaEdgeIndex: 0n },
+            timeStamps: { proofExpireTimeStamp: ts.proof_expire_time_stamp, historicTimeStamp: ts.historic_time_stamp },
+            unshieldingCommitments: [{ recipient: BigInt(recipient), amount: note.amount, assetId: note.assetId }, noUnshieldCommitment, noUnshieldCommitment, noUnshieldCommitment],
+            unshieldTargets: [{ wrapperFactory: factory.address, wrapperArgs: encodeWrapperArgs({ wrapper: wrapper.address, underlying }) }, noTarget, noTarget, noTarget],
+            nullifiers: [...nullifiers],
+            recipientCommitmentsHashes: [...recipientHashes],
+            messages: NO_MESSAGES,
+            publicHash: PUBLIC_HASH,
+            proof,
+        };
+
+        const wrappedBefore = await wrapper.read.balanceOf([recipient]);
+        const underlyingBefore = await token.read.balanceOf([recipient]);
+        await send(warptoad.write.transactPrivate([tx]));
+        assert.equal(await wrapper.read.balanceOf([recipient]), wrappedBefore + note.amount, "unshielded into the wrapper");
+        assert.equal(await warptoad.read.nullifiers([nullifiers[0]]) > 0n, true);
+
+        await send(factory.write.unWrap([wrapper.address, note.amount, recipient], { account: wallet.account }));
+        assert.equal(await wrapper.read.balanceOf([recipient]), wrappedBefore, "wrapper burned");
+        assert.equal(await token.read.balanceOf([recipient]), underlyingBefore + note.amount, "got the underlying");
+    }
+
+    it("4. alice unshields and unwraps the 200 DAI bob made for her, bob his 300 USDC", async () => {
+        // the maker's note was built by the taker, so this is the proof it came out spendable
+        await unshieldAndUnwrap(alicePayment, daiAsset, alice, aliceWallet, daiWrapper, dai, 4000);
+        await unshieldAndUnwrap(bobUsdc, usdcAsset, bob, bobWallet, usdcWrapper, usdc, 5000);
     });
 });

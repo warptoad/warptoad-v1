@@ -6,7 +6,7 @@
  * a fresh tree: ChainConfig for the local chain, verifier, Warptoad and a WrapperFactory
  */
 import type { network } from "hardhat";
-import type { Address, Hex } from "viem";
+import { parseEther, type Address, type Hex } from "viem";
 import { deployCreate2, type Create2Artifact, deployCreate2Factory } from "@warptoad/skinny-fat-imt-js/create2";
 import { chainConfigArgs, NAME_PREFIX, SYMBOL_PREFIX } from "../src/config.js";
 import { CIRCUIT_SIZE } from "../src/constants.js";
@@ -68,6 +68,22 @@ export async function deployWarptoad(viem: Viem, infra: Infra) {
     ]);
     const gigaIndex = BigInt(await warptoad.read.gigaIndex());
     return { chainConfig, verifier, warptoad, factory, gigaIndex };
+}
+
+/**
+ * on a live chain alice and bob are their own accounts (see hardhat.config.ts) and need gas. The deployer tops
+ * `to` up to `topUp` when it holds less than `min`. No-op for the deployer itself
+ */
+export async function fundIfLow(
+    publicClient: PublicClient,
+    deployer: WalletClient,
+    to: Address,
+    { min = parseEther("0.02"), topUp = parseEther("0.05") } = {},
+): Promise<void> {
+    if (to.toLowerCase() === deployer.account.address.toLowerCase()) return;
+    if ((await publicClient.getBalance({ address: to })) >= min) return;
+    const hash = await deployer.sendTransaction({ to, value: topUp });
+    await publicClient.waitForTransactionReceipt({ hash });
 }
 
 /** wrap, then look the wrapper up in the factory's `wrappers` mapping under this chain's giga index */
