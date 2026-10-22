@@ -62,9 +62,13 @@ import { publicHashOf } from "../src/messages.js";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { Barretenberg, UltraHonkBackend } from "@aztec/bb.js";
-import type { Address, Hex } from "viem";
+import { parseUnits, type Address, type Hex } from "viem";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
 import { deployInfra, deployWarptoad, fundIfLow, wrap, ZERO_ADDRESS, type WalletClient } from "./fixtures.js";
+
+/** amounts in the token's own decimals: USDC has 6, DAI 18. Notes and the circuit only ever see the raw integer */
+const USDC = (amount: string) => parseUnits(amount, 6);
+const DAI = (amount: string) => parseUnits(amount, 18);
 
 const NO_MESSAGES: Hex[] = ["0x", "0x", "0x", "0x"];
 const { publicHash: PUBLIC_HASH, firstMessageHash: FIRST_MESSAGE_HASH } = publicHashOf(NO_MESSAGES);
@@ -155,7 +159,7 @@ describe("ClaudesLilSwapToad", async function () {
         return { proof_expire_time_stamp: now + 3600n, historic_time_stamp: now - 3600n };
     }
 
-    async function mockToken(symbol: "USDC" | "DAI", name: string, decimals: number, holder: Address) {
+    async function mockToken(symbol: "USDC" | "DAI", name: string, decimals: number, holder: Address, amount: bigint) {
         const known = MOCK_TOKENS[chainId]?.[symbol];
         let token: ContractReturnType<"MockERC20">;
         if (known !== undefined) {
@@ -164,8 +168,9 @@ describe("ClaudesLilSwapToad", async function () {
             token = await viem.deployContract("MockERC20", [name, symbol, decimals]);
             if (live) console.log(`deployed MockERC20 ${symbol} at ${token.address}, add it to MOCK_TOKENS to reuse it`);
         }
-        await send(token.write.mint([holder, 1000n]));
-        await send(token.write.approve([factory.address, 1000n], { account: holder }));
+        assert.equal(await token.read.decimals(), decimals, `${symbol} mock has the decimals the amounts assume`);
+        await send(token.write.mint([holder, amount]));
+        await send(token.write.approve([factory.address, amount], { account: holder }));
         return token;
     }
 
@@ -195,8 +200,8 @@ describe("ClaudesLilSwapToad", async function () {
             await fundIfLow(publicClient, deployer, aliceWallet.account.address);
             await fundIfLow(publicClient, deployer, bobWallet.account.address);
         }
-        usdc = await mockToken("USDC", "USD Coin", 6, aliceWallet.account.address);
-        dai = await mockToken("DAI", "Dai Stablecoin", 18, bobWallet.account.address);
+        usdc = await mockToken("USDC", "USD Coin", 6, aliceWallet.account.address, USDC("1000"));
+        dai = await mockToken("DAI", "Dai Stablecoin", 18, bobWallet.account.address, DAI("1000"));
 
         bb = await Barretenberg.new({ threads: cpus().length });
         backend = new UltraHonkBackend(circuit.bytecode, bb);
@@ -207,8 +212,8 @@ describe("ClaudesLilSwapToad", async function () {
     });
 
     it("1. alice locks 400 USDC twice, bob shields 500 DAI", async () => {
-        usdcWrapper = await wrap(viem, { factory, gigaIndex }, usdc.address, 1000n, aliceWallet.account.address, aliceWallet.account.address);
-        daiWrapper = await wrap(viem, { factory, gigaIndex }, dai.address, 1000n, bobWallet.account.address, bobWallet.account.address);
+        usdcWrapper = await wrap(viem, { factory, gigaIndex }, usdc.address, USDC("1000"), aliceWallet.account.address, aliceWallet.account.address);
+        daiWrapper = await wrap(viem, { factory, gigaIndex }, dai.address, DAI("1000"), bobWallet.account.address, bobWallet.account.address);
         const [firstGigaIndex, lastGigaIndex] = await factory.read.gigaIndexRange();
         usdcAsset = assetOf({ wrapperFactory: factory.address, wrapper: usdcWrapper.address, underlying: usdc.address, firstGigaIndex, lastGigaIndex });
         daiAsset = assetOf({ wrapperFactory: factory.address, wrapper: daiWrapper.address, underlying: dai.address, firstGigaIndex, lastGigaIndex });
@@ -219,12 +224,12 @@ describe("ClaudesLilSwapToad", async function () {
             ownerHash: alice.ownerHash,
             sharedNonce: nonce(1001),
             assetId: usdcId,
-            amount: 400n,
+            amount: USDC("400"),
             circuitCompSelector: SWAP_TOAD_SELECTOR,
             circuitCompStorage: lockStorage(cancelLockSecret),
         };
         fillLock = { ...cancelLock, sharedNonce: nonce(1002), circuitCompStorage: lockStorage(fillLockSecret) };
-        bobDai = { ownerHash: bob.ownerHash, sharedNonce: nonce(1003), assetId: daiId, amount: 500n };
+        bobDai = { ownerHash: bob.ownerHash, sharedNonce: nonce(1003), assetId: daiId, amount: DAI("500") };
 
         // shield takes any pre_commitment_hash, so a lock can be made straight from a wrapper balance
         const aliceUsdcBefore = await usdcWrapper.read.balanceOf([aliceWallet.account.address]);
@@ -234,10 +239,10 @@ describe("ClaudesLilSwapToad", async function () {
             await send(warptoad.write.shield([factory.address, preCommitmentHashOf(lock), lock.amount, usdcArgs, "0x"], { account: aliceWallet.account }));
         }
         const daiArgs = encodeWrapperArgs({ wrapper: daiWrapper.address, underlying: dai.address });
-        await send(warptoad.write.shield([factory.address, preCommitmentHashOf(bobDai), 500n, daiArgs, "0x"], { account: bobWallet.account }));
+        await send(warptoad.write.shield([factory.address, preCommitmentHashOf(bobDai), bobDai.amount, daiArgs, "0x"], { account: bobWallet.account }));
 
-        assert.equal(await usdcWrapper.read.balanceOf([aliceWallet.account.address]), aliceUsdcBefore - 800n);
-        assert.equal(await daiWrapper.read.balanceOf([bobWallet.account.address]), bobDaiBefore - 500n);
+        assert.equal(await usdcWrapper.read.balanceOf([aliceWallet.account.address]), aliceUsdcBefore - USDC("800"));
+        assert.equal(await daiWrapper.read.balanceOf([bobWallet.account.address]), bobDaiBefore - DAI("500"));
         assert.deepEqual((await tree()).leaves.slice(-3), [cancelLock, fillLock, bobDai].map(hashNote));
     });
 
@@ -246,7 +251,7 @@ describe("ClaudesLilSwapToad", async function () {
         const { proof: lockProof, edgeIndex } = merkleProofInput(localTree, hashNote(cancelLock));
 
         // the only real new note: same asset and amount as the lock, the circuit checks nothing else about it
-        const refund: Note = { ownerHash: alice.ownerHash, sharedNonce: nonce(2001), assetId: usdcId, amount: 400n };
+        const refund: Note = { ownerHash: alice.ownerHash, sharedNonce: nonce(2001), assetId: usdcId, amount: cancelLock.amount };
         const recipients = [refund, fakeNote(nonce(2002)), fakeNote(nonce(2003)), fakeNote(nonce(2004))];
         const recipientHashes = [
             hashNote(refund),
@@ -326,27 +331,31 @@ describe("ClaudesLilSwapToad", async function () {
         const ts = await timeStamps();
 
         // ---- alice's side, all of it before bob shows up: the order, and the two notes bob will make for her.
+        // She sells 300 of the 400 locked USDC for 200 DAI, so 1.5 USDC per DAI. Amounts are raw integers in each
+        // token's own decimals, the circuit never compares across assets so the different decimals don't matter to it
+        const listingAmount = USDC("300");
+        const paymentAmount = DAI("200");
         // their nonces come from the lock's secret so bob can't pick them, type 0 is the payment, 1 the change
         alicePayment = {
             ownerHash: alice.ownerHash,
             sharedNonce: hashSharedNonceSwaptoad({ sharedNullifierSecret: fillLockSecret, commitmentType: 0n }),
             assetId: daiId,
-            amount: 200n,
+            amount: paymentAmount,
         };
         const aliceChange: Note = {
             ownerHash: alice.ownerHash,
             sharedNonce: hashSharedNonceSwaptoad({ sharedNullifierSecret: fillLockSecret, commitmentType: 1n }),
             assetId: usdcId,
-            amount: 100n,
+            amount: fillLock.amount - listingAmount,
         };
         // `SwapToadOrder` in circuits/src/main.nr, in the order the maker signs it. The order must outlive the proof.
         // first_message_hash pins messages[0] and [1], where the notes for aliceChange and alicePayment would go.
         // The owner keys hash is what lets the circuit check the lock is on this chain's giga index
         const order = authSigInputs([
             usdcId,
-            300n,
+            listingAmount,
             daiId,
-            200n,
+            paymentAmount,
             ts.proof_expire_time_stamp + 3600n,
             FIRST_MESSAGE_HASH,
             preCommitmentHashOf(aliceChange),
@@ -355,8 +364,8 @@ describe("ClaudesLilSwapToad", async function () {
         const orderSig = signMessage(alice.orderKey, hashCircuitComponentAuthSig({ authSigInputs: order }));
 
         // ---- bob's side: alice handed him the order, its signature and fillLockSecret
-        const bobChange: Note = { ownerHash: bob.ownerHash, sharedNonce: nonce(3001), assetId: daiId, amount: 300n };
-        bobUsdc = { ownerHash: bob.ownerHash, sharedNonce: nonce(3002), assetId: usdcId, amount: 300n };
+        const bobChange: Note = { ownerHash: bob.ownerHash, sharedNonce: nonce(3001), assetId: daiId, amount: bobDai.amount - paymentAmount };
+        bobUsdc = { ownerHash: bob.ownerHash, sharedNonce: nonce(3002), assetId: usdcId, amount: listingAmount };
         // slot order is fixed by the circuit: maker change, maker payment, taker change, taker payment
         const recipients = [aliceChange, alicePayment, bobChange, bobUsdc];
         const recipientHashes = recipients.map(hashNote) as CircuitSizeFields;
