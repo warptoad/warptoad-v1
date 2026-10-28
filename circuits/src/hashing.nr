@@ -20,8 +20,8 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  * without knowing                |             /  asset_id  amount
  * their chain or pubKey       pre_commitment_hash         \                                
  *         \                  /   |      \       \          \                            
- *        ----owner_hash------  shared_  CIRCUIT_ \   wraptoad.sol -> poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )
- *        / |       |        \   nonce   CONTRACT  \                                                      \ 
+ *        ----owner_hash------  shared_  CIRCUIT_ \   wraptoad.sol -> poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )         # for permissioned shielded minting, we should do poseidon here so circuit can do it. + we need to tell wrapperFactoryAddr that it was minted in shielded (so you can block unwrapping), maybe timestamp the mint in asset_id so wrapper factory can refuse unshields of mints passed a time window. Also kind of need a account based note to track total amount minted, 
+ *        / |       |        \   nonce   CONTRACT  \                                                      \                       |                                 # for permissionless / ico / payed mints/ we need a different way of thinking. 1. Shielded pay + commit to future time stamp. 2. read randao at that time stamp + mint + commitment has timestamp, then offchain + wrapperFactory derives attribute from that randao as seed.
  *       / /        |         \      |              circuit_component_storage_hash        wraptoad.sol -> keccak(wrapperFactoryAddr,_wrapperAssetHash)        
  *  spending  dest_giga_index  \   to blind commit                            |                                                                    |
  *   PubKey                     \                                             |                                       wrapperfactory.sol -> erc20=keccak(wrapperAddr,underlyingAddr), erc721=keccak(wrapperAddr,underlyingAddr, id)

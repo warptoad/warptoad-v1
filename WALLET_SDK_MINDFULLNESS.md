@@ -8,14 +8,6 @@ Lock, fill, cancel and transfer share one circuit (`circuits/src/main.nr`) and o
 (`ShieldedTx` in `contracts/Warptoad.sol`): 4 nullifiers, 4 recipient commitments, 4 messages.
 Everything that could still distinguish them, or link a user's transactions, is in the hands of the wallet SDK or the user.
 
-## The protocol always leaks, unintended by design
-
-Nothing known at the moment. Fake and real slots are indistinguishable on-chain, the public inputs that remain
-(roots, edge indexes, timestamps, `public_hash`, `first_message_hash`) are all chosen by the SDK and covered below.
-
-Things the protocol leaks **by design** (not listed further): shield and unshield amounts, assets and addresses,
-and the relayer / sender address of every transaction.
-
 ## SDK needs to be mindful of this
 
 ### Roots come from a grid, not from "now"
