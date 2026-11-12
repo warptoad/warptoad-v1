@@ -776,13 +776,6 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
     }
 }
 
-struct Total {
-    asset_id: Field,
-    spendable: Field,
-    spend: Field,
-}
-
-
 // makes a array of indexes that point the same asset_id to the same index.
 // so [a,c,a,b] -> [0,1,0,3]
 // notice that "b" ends up at index 3 not 2. that is becuase the function matches up
@@ -833,47 +826,51 @@ fn check_accounting<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             inputs.actual_amount_recipient_commitments,
         )
     };
-    let mut totals: [Total; SIZE] = std::mem::zeroed();
+    // seed asset_ids before the loop so we dont have to check asset_ids[i] == 0x00
+    // also needs to be done here and not in loop below 
+    // since r/s_indexes point forward and check asset_ids before it is filled
+    let mut asset_ids: [Field; SIZE] = std::mem::zeroed();
+    for i in 0..SIZE {
+        asset_ids[i] = inputs.spend_commitments_and_roots[i].asset_id;
+    }
+    let mut spendable: [Field; SIZE] = std::mem::zeroed();
+    let mut spend: [Field; SIZE] = std::mem::zeroed();
     for i in 0..SIZE {
         if (i < inputs.actual_amount_spend_commitments) {
+            let total_index: u32 = s_indexes[i];
             assert(
-                s_indexes[i] < inputs.actual_amount_spend_commitments,
+                total_index < inputs.actual_amount_spend_commitments,
                 "total index points at a fake spend commitment",
             );
             let s_commit: ProvenCommitment = inputs.spend_commitments_and_roots[i];
-            if (totals[s_indexes[i]].asset_id == 0x00) {
-                totals[s_indexes[i]].asset_id = s_commit.asset_id;
-            }
             assert(
-                totals[s_indexes[i]].asset_id == s_commit.asset_id,
+                asset_ids[total_index] == s_commit.asset_id,
                 "get_totals_indexes provided a asset_id mismatch",
             );
-            totals[s_indexes[i]].spendable += s_commit.amount;
+            spendable[total_index] += s_commit.amount;
         }
 
         if (i < inputs.actual_amount_recipient_commitments) {
+            let total_index: u32 = r_indexes[i];
+            // a total is always from a spend commitment, so this is compared to the amount of spend commitments
             assert(
-                r_indexes[i] < inputs.actual_amount_recipient_commitments,
+                total_index < inputs.actual_amount_spend_commitments,
                 "total index points at a fake spend commitment",
             );
             let r_commit: CommitmentRecipientData = inputs.recipient_commitments[i];
-            if (totals[r_indexes[i]].asset_id == 0x00) {
-                totals[r_indexes[i]].asset_id = r_commit.asset_id;
-            }
+            // this also fails when the asset_id of this recipient commitment is not being spend at all
+            // since then there is no total that has it's asset_id
             assert(
-                totals[r_indexes[i]].asset_id == r_commit.asset_id,
+                asset_ids[total_index] == r_commit.asset_id,
                 "get_totals_indexes provided a asset_id mismatch",
             );
-            totals[r_indexes[i]].spend += r_commit.amount;
+            spend[total_index] += r_commit.amount;
 
-            assert(lower_or_equal(r_commit.amount, totals[r_indexes[i]].spend), "spend overflowed");
+            assert(lower_or_equal(r_commit.amount, spend[total_index]), "spend overflowed");
         }
     }
     for i in 0..SIZE {
-        assert(
-            lower_or_equal(totals[i].spend, totals[i].spendable),
-            "trying to spend more then available",
-        );
+        assert(lower_or_equal(spend[i], spendable[i]), "trying to spend more then available");
     }
 }
 
