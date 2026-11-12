@@ -433,7 +433,7 @@ pub struct SwapToadOrder {
     expiry: Field,
     first_message_hash: Field,
     maker_pre_commitment_hash: Field,
-    owner_keys_hash: Field
+    owner_keys_hash: Field,
 }
 
 pub struct SwapToadStorage {
@@ -464,6 +464,7 @@ fn check_root<let STRING_SIZE: u32, let SIZE: u32>(
 // and **any** value they want into circuit_comp_storage_hash!
 // this function is ran to proof a toad_swap is filled
 fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
+    // TODO when using check_accounting, constrain the actual amount commitments spend/recipient
     let locked_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[0];
     // check root
     check_root(locked_commitment, inputs, "locked_commitment");
@@ -775,6 +776,107 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
     }
 }
 
+struct Total {
+    asset_id: Field,
+    spendable: Field,
+    spend: Field,
+}
+
+
+// makes a array of indexes that point the same asset_id to the same index.
+// so [a,c,a,b] -> [0,1,0,3]
+// notice that "b" ends up at index 3 not 2. that is becuase the function matches up
+// with the first occurance of that asset_id in the original order
+// so you also get ur total in `check_accounting` to be [a,c,nothing,b]
+unconstrained fn get_totals_indexes<let SIZE: u32>(
+    spend_commitments: [ProvenCommitment; SIZE],
+    actual_amount_spend_commitments: u32,
+    recipient_commitments: [CommitmentRecipientData; SIZE],
+    actual_amount_recipient_commitments: u32,
+) -> ([u32; SIZE], [u32; SIZE]) {
+    let mut s_indexes: [u32; SIZE] = std::mem::zeroed();
+    let mut r_indexes: [u32; SIZE] = std::mem::zeroed();
+    // 
+    for i in 0..actual_amount_spend_commitments {
+        for j in 0..actual_amount_spend_commitments {
+            if (spend_commitments[j].asset_id == spend_commitments[i].asset_id) {
+                s_indexes[i] = j;
+                break;
+            }
+        }
+    }
+    for i in 0..actual_amount_recipient_commitments {
+        for j in 0..actual_amount_spend_commitments {
+            if (spend_commitments[j].asset_id == recipient_commitments[i].asset_id) {
+                r_indexes[i] = j;
+                break;
+            }
+        }
+    }
+    (s_indexes, r_indexes)
+}
+
+// TODO naming
+// but bassically this guy checks:
+// spend_commitments are spend. And amounts on new recipients_commitments add up
+// then later join_split can check if owner owns those commitments
+// same toadswap, but either checks owner can cancel or taker has sig,
+// bassically circuit contracts can costumize how they check preCommitHash and ownerhash
+// and some also want to do that for the new recipient commitments being created (like toadswap!)
+fn check_accounting<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
+    // @Safety: we let prover dump commitments in any order. And then use a unconstraint function to get the indexes of both
+    let (s_indexes, r_indexes) = unsafe {
+        get_totals_indexes(
+            inputs.spend_commitments_and_roots,
+            inputs.actual_amount_spend_commitments,
+            inputs.recipient_commitments,
+            inputs.actual_amount_recipient_commitments,
+        )
+    };
+    let mut totals: [Total; SIZE] = std::mem::zeroed();
+    for i in 0..SIZE {
+        if (i < inputs.actual_amount_spend_commitments) {
+            assert(
+                s_indexes[i] < inputs.actual_amount_spend_commitments,
+                "total index points at a fake spend commitment",
+            );
+            let s_commit: ProvenCommitment = inputs.spend_commitments_and_roots[i];
+            if (totals[s_indexes[i]].asset_id == 0x00) {
+                totals[s_indexes[i]].asset_id = s_commit.asset_id;
+            }
+            assert(
+                totals[s_indexes[i]].asset_id == s_commit.asset_id,
+                "get_totals_indexes provided a asset_id mismatch",
+            );
+            totals[s_indexes[i]].spendable += s_commit.amount;
+        }
+
+        if (i < inputs.actual_amount_recipient_commitments) {
+            assert(
+                r_indexes[i] < inputs.actual_amount_recipient_commitments,
+                "total index points at a fake spend commitment",
+            );
+            let r_commit: CommitmentRecipientData = inputs.recipient_commitments[i];
+            if (totals[r_indexes[i]].asset_id == 0x00) {
+                totals[r_indexes[i]].asset_id = r_commit.asset_id;
+            }
+            assert(
+                totals[r_indexes[i]].asset_id == r_commit.asset_id,
+                "get_totals_indexes provided a asset_id mismatch",
+            );
+            totals[r_indexes[i]].spend += r_commit.amount;
+
+            assert(lower_or_equal(r_commit.amount, totals[r_indexes[i]].spend), "spend overflowed");
+        }
+    }
+    for i in 0..SIZE {
+        assert(
+            lower_or_equal(totals[i].spend, totals[i].spendable),
+            "trying to spend more then available",
+        );
+    }
+}
+
 // TODO dummy nullifiers and commitment_hashes
 fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
     // only one asset at the time pls
@@ -830,22 +932,6 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
         let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
         let mut recipient_commitment_hash: Field = 0x00;
         if (index < inputs.actual_amount_recipient_commitments) {
-            let recipient_circuit_comp_storage_hash: Field =
-                hash_circuit_component_storage(recipient_commitment.circuit_comp_input);
-
-            // This customizable check is dropped, when ever someone does shield() in warptoad.sol
-            // They can put anything they want into pre_commitment_hash, including the storage hash
-            // So checking these inputs here is useless if it can be bypassed anyway
-            // We just need to assume anything can appear into storage like that and rely on asset_id and amount
-            // For accounting / solvency
-            // if (recipient_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
-            //     recipient_storage_hash = hash_join_split_inputs(inputs)
-            // } else {
-            //     assert(
-            //         false,
-            //         "unknown circuit_comp_selector in recipient_commitments when trying to call a circuit component",
-            //     );
-            // };
             assert(
                 expected_asset_id == recipient_commitment.asset_id,
                 "recipient_commitments does not contain all same assetIds",
@@ -856,18 +942,6 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
             assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
 
-            // TODO hoist this out of here so other circuit components don't do double works hashing like this
-            // and check here:
-            // recipient_commitment_hash == inputs.recipient_commitments_hashes[index]
-            // expected_asset_id == recipient_commitment.asset_id
-            // recipient_storage_hash == recipient_commitment.circuit_comp_storage_hash
-            // let pre_commitment_hash: Field = hash_pre_commitment(
-            //     recipient_commitment.owner_hash,
-            //     recipient_commitment.shared_nonce,
-            //     // notice: circuit_comp selector/storage can be set to anything here
-            //     recipient_commitment.circuit_comp_selector,
-            //     recipient_circuit_comp_storage_hash,
-            // );
             recipient_commitment_hash = hash_commitment(
                 recipient_commitment.pre_commitment_hash,
                 expected_asset_id,
