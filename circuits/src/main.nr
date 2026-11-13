@@ -351,16 +351,30 @@ fn main(
         owner_hash,
     };
 
-    if (priv_in.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
+    let pending_accounting_check: [CommitmentRecipientData; CIRCUIT_SIZE] = if (
+        priv_in.circuit_comp_selector == JOIN_SPLIT_SELECTOR
+    ) {
         // TODO nullifier = h(nullifier_secret, giga_index, local_index)
         // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
         // just add a nullifier slot number
-        join_split(circuit_comp_inputs);
+        join_split(circuit_comp_inputs)
     } else if priv_in.circuit_comp_selector == SWAP_TOAD_SELECTOR {
-        swaptoad(circuit_comp_inputs);
+        swaptoad(circuit_comp_inputs)
     } else {
         assert(false, "unknown signed_data.circuit_component_selector");
-    }
+        std::mem::zeroed()
+    };
+
+    check_accounting(
+        pending_accounting_check,
+        // circuit components can modify this incase of minting / creating new asset_ids / if accounting already checked somehow
+        // but caller needs to be forced to leave those recipient commitments last
+        circuit_comp_inputs.actual_amount_recipient_commitments,
+        circuit_comp_inputs.spend_commitments_and_roots,
+        // no need to modify this one. Larger totals are harmless in anycase (AFAIK)
+        // i dont see a circuit component reading a commitment and then that thing tripping up account somehow? Nah
+        circuit_comp_inputs.actual_amount_spend_commitments,
+    );
 
     // @WARNING every circuit component should either block unshield by doing assert(unshielding_commitment.asset_id == 0x00)
     // or correctly check accounting on these unshielding_commitments
@@ -463,8 +477,12 @@ fn check_root<let STRING_SIZE: u32, let SIZE: u32>(
 // @notice: maker locks tokens into a toad_swap lock by creating commitments with circuit_comp_selector set to TOAD_SWAP_SELECTOR
 // and **any** value they want into circuit_comp_storage_hash!
 // this function is ran to proof a toad_swap is filled
-fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
-    // TODO when using check_accounting, constrain the actual amount commitments spend/recipient
+fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> [CommitmentRecipientData; SIZE] {
+    // @TODO WARNING: the assumption is that only 1 maker and 1 taker is in swaptoad
+    // and only 1 swaptoad happens per proof. Since check_accounting creates total per asset_id
+    // and does not care who owns that. So settling 2 swaptoads of the same asset_id of 2 different makers
+    // allows prover to just steal the change of one maker and send it to another maker!
+    // TLDR: "1 maker and 1 taker" + "1 swaptoad per proof", other wise STOLEN FUNDS
     let locked_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[0];
     // check root
     check_root(locked_commitment, inputs, "locked_commitment");
@@ -507,6 +525,8 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
 
         // we only need to nullify the locked commitment, but this always needs to happen, so happens after this if/else block
         // After this if/else block all after the second nullfier is nullified but not the second so let do that now
+        // TODO instead of making fakes here will be moved out once swaptoad scales with circuit size
+        // at that point, other commitments slots are handed to the other circuit component called
         taker_spend_nullfier =
             hash_fake_nullifier(inputs.spend_commitments_and_roots[1].shared_nonce);
         assert(
@@ -535,6 +555,11 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             maker_pre_commitment_hash: inputs.auth_sig_inputs[6],
             owner_keys_hash: inputs.auth_sig_inputs[7],
         };
+
+        assert(
+            signed_order.listing_asset_id != signed_order.payment_asset_id,
+            "listing and payment asset can not be the same",
+        );
 
         assert(
             inputs.proof_expire_time_stamp.lt(signed_order.expiry),
@@ -655,7 +680,8 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             "shared_nonce has to be a hashed with hash_shared_nonce_swaptoad",
         );
 
-        // amounts
+        // check the new commitments exactly match the fill
+        // if there is change, `check_account` would already check amounts (but not ownership!)
         assert(
             maker_new_commit.amount == signed_order.payment_amount,
             "maker_new_commit.amount mismatch",
@@ -664,25 +690,28 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             taker_new_commit.amount == signed_order.listing_amount,
             "taker_new_commit.amount mismatch",
         );
-        assert(
-            maker_change_commit.amount == locked_commitment.amount - signed_order.listing_amount,
-            "maker_change_commit.amount mismatch",
-        );
-        assert(
-            taker_change_commit.amount
-                == taker_spend_commitment.amount - signed_order.payment_amount,
-            "taker_change_commit.amount mismatch",
-        );
 
+        // check account already makes sure the change commits have a valid amount
+        // assert(
+        //     maker_change_commit.amount == locked_commitment.amount - signed_order.listing_amount,
+        //     "maker_change_commit.amount mismatch",
+        // );
+        // assert(
+        //     taker_change_commit.amount
+        //         == taker_spend_commitment.amount - signed_order.payment_amount,
+        //     "taker_change_commit.amount mismatch",
+        // );
+
+        // done by check_accounting
         // balance checks on the 2 commitments being spend
-        assert(
-            greater_or_equal(locked_commitment.amount, taker_new_commit.amount),
-            "taker is taking more tokens then there are in the locked commitments",
-        );
-        assert(
-            greater_or_equal(taker_spend_commitment.amount, maker_new_commit.amount),
-            "maker is recieving more tokens then taker has in their taker_spend_commitment",
-        );
+        // assert(
+        //     greater_or_equal(locked_commitment.amount, taker_new_commit.amount),
+        //     "taker is taking more tokens then there are in the locked commitments",
+        // );
+        // assert(
+        //     greater_or_equal(taker_spend_commitment.amount, maker_new_commit.amount),
+        //     "maker is recieving more tokens then taker has in their taker_spend_commitment",
+        // );
 
         // locked_commitment was already checked above this if/else, since it is always spend
         // but takers spend still needs a check
@@ -711,6 +740,8 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
                 ),
             "maker_new_commit.pre_commitment_hash mismath with hashed values on fill",
         );
+
+        // TODO i feel like we can hoist this out and save on more proof time
         maker_new_commit_hash = hash_commitment(
             maker_new_commit.pre_commitment_hash,
             maker_new_commit.asset_id,
@@ -774,6 +805,7 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             "fake nullifier mismatch. All nullifiers after the first 2 need to be fake when canceling or filling swaptoad commitment",
         );
     }
+    inputs.recipient_commitments
 }
 
 // makes a array of indexes that point the same asset_id to the same index.
@@ -789,7 +821,7 @@ unconstrained fn get_totals_indexes<let SIZE: u32>(
 ) -> ([u32; SIZE], [u32; SIZE]) {
     let mut s_indexes: [u32; SIZE] = std::mem::zeroed();
     let mut r_indexes: [u32; SIZE] = std::mem::zeroed();
-    // 
+    //
     for i in 0..actual_amount_spend_commitments {
         for j in 0..actual_amount_spend_commitments {
             if (spend_commitments[j].asset_id == spend_commitments[i].asset_id) {
@@ -816,33 +848,38 @@ unconstrained fn get_totals_indexes<let SIZE: u32>(
 // same toadswap, but either checks owner can cancel or taker has sig,
 // bassically circuit contracts can costumize how they check preCommitHash and ownerhash
 // and some also want to do that for the new recipient commitments being created (like toadswap!)
-fn check_accounting<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
+fn check_accounting<let SIZE: u32>(
+    recipient_commitments: [CommitmentRecipientData; SIZE],
+    actual_amount_recipient_commitments: u32,
+    spend_commitments_and_roots: [ProvenCommitment; SIZE],
+    actual_amount_spend_commitments: u32,
+) {
     // @Safety: we let prover dump commitments in any order. And then use a unconstraint function to get the indexes of both
     let (s_indexes, r_indexes) = unsafe {
         get_totals_indexes(
-            inputs.spend_commitments_and_roots,
-            inputs.actual_amount_spend_commitments,
-            inputs.recipient_commitments,
-            inputs.actual_amount_recipient_commitments,
+            spend_commitments_and_roots,
+            actual_amount_spend_commitments,
+            recipient_commitments,
+            actual_amount_recipient_commitments,
         )
     };
     // seed asset_ids before the loop so we dont have to check asset_ids[i] == 0x00
-    // also needs to be done here and not in loop below 
+    // also needs to be done here and not in loop below
     // since r/s_indexes point forward and check asset_ids before it is filled
     let mut asset_ids: [Field; SIZE] = std::mem::zeroed();
     for i in 0..SIZE {
-        asset_ids[i] = inputs.spend_commitments_and_roots[i].asset_id;
+        asset_ids[i] = spend_commitments_and_roots[i].asset_id;
     }
     let mut spendable: [Field; SIZE] = std::mem::zeroed();
     let mut spend: [Field; SIZE] = std::mem::zeroed();
     for i in 0..SIZE {
-        if (i < inputs.actual_amount_spend_commitments) {
+        if (i < actual_amount_spend_commitments) {
             let total_index: u32 = s_indexes[i];
             assert(
-                total_index < inputs.actual_amount_spend_commitments,
+                total_index < actual_amount_spend_commitments,
                 "total index points at a fake spend commitment",
             );
-            let s_commit: ProvenCommitment = inputs.spend_commitments_and_roots[i];
+            let s_commit: ProvenCommitment = spend_commitments_and_roots[i];
             assert(
                 asset_ids[total_index] == s_commit.asset_id,
                 "get_totals_indexes provided a asset_id mismatch",
@@ -850,14 +887,14 @@ fn check_accounting<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             spendable[total_index] += s_commit.amount;
         }
 
-        if (i < inputs.actual_amount_recipient_commitments) {
+        if (i < actual_amount_recipient_commitments) {
             let total_index: u32 = r_indexes[i];
             // a total is always from a spend commitment, so this is compared to the amount of spend commitments
             assert(
-                total_index < inputs.actual_amount_spend_commitments,
+                total_index < actual_amount_spend_commitments,
                 "total index points at a fake spend commitment",
             );
-            let r_commit: CommitmentRecipientData = inputs.recipient_commitments[i];
+            let r_commit: CommitmentRecipientData = recipient_commitments[i];
             // this also fails when the asset_id of this recipient commitment is not being spend at all
             // since then there is no total that has it's asset_id
             assert(
@@ -870,16 +907,17 @@ fn check_accounting<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
         }
     }
     for i in 0..SIZE {
-        assert(lower_or_equal(spend[i], spendable[i]), "trying to spend more then available");
+        assert(spend[i] == spendable[i], "spend and spendable need to add up exactly");
     }
 }
 
 // TODO dummy nullifiers and commitment_hashes
-fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
+fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> [CommitmentRecipientData; SIZE] {
     // only one asset at the time pls
     let expected_asset_id: Field = inputs.spend_commitments_and_roots[0].asset_id;
-    let mut spendable: Field = 0;
-    let mut spend: Field = 0;
+    // checked by `check_accounting` now
+    // let mut spendable: Field = 0;
+    // let mut spend: Field = 0;
     for index in 0..SIZE {
         // ----------- spend commitment --------------------------
         let spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[index];
@@ -917,7 +955,7 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
                 spend_commitment.giga_leaf_index,
                 spend_commitment.local_leaf_index,
             );
-            spendable += spend_commitment.amount;
+            //spendable += spend_commitment.amount;
         } else {
             // we ignore it, and don't add it to spendable amount
             // TODO make sure nullifier is fake and not trying to nullify someone else!
@@ -935,9 +973,9 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             );
 
             // track amounts
-            spend += recipient_commitment.amount;
+            // spend += recipient_commitment.amount;
             // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
-            assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
+            // assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
 
             recipient_commitment_hash = hash_commitment(
                 recipient_commitment.pre_commitment_hash,
@@ -953,5 +991,6 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
             "a commitment_hash from public inputs does not match the recipient_commitment inputs hashed in circuit",
         );
     }
-    assert(lower_or_equal(spend, spendable), "not enough funds");
+    // assert(lower_or_equal(spend, spendable), "not enough funds");
+    inputs.recipient_commitments
 }
