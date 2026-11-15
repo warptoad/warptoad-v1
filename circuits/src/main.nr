@@ -13,7 +13,7 @@ use crate::hashing::{
 
 use crate::constants::{
     CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_COMP_STORAGE_SIZE,
-    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH, SWAP_TOAD_SELECTOR,
+    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH, SWAP_TOAD_ORDER_SIZE, SWAP_TOAD_SELECTOR,
 };
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
@@ -120,7 +120,6 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             // proven_commitments[index].commitment_hash =
             //     hash_fake_commitment(spend_commitment.commitment.shared_nonce)
         }
-        // fake commitments do need a share_nonce to make their fake nullifier look random
         proven_commitments[index].shared_nonce = spend_commitment.commitment.shared_nonce;
     }
     proven_commitments
@@ -163,8 +162,12 @@ struct CommitmentProofData {
 struct CommitmentRecipientData {
     owner_hash: Field,
     shared_nonce: Field,
+    //------------------------------
+    //@TODO BEFORE PER TX NULLIFIER BRANCH remove `circuit_comp_selector, circuit_comp_input`
+    // for now keep these to minimize breaking changes
     circuit_comp_selector: Field,
     circuit_comp_input: [Field; CIRCUIT_COMP_STORAGE_SIZE],
+    //-----------------------
     asset_id: Field,
     amount: Field,
     pre_commitment_hash: Field,
@@ -350,23 +353,22 @@ fn main(
         auth_sig_pubkey: priv_in.auth.pub_key,
         owner_hash,
     };
+    // --------------- circuit components ----------------
+    // TODO PER TX NULLIFIER BRANCH:
+    // swaptoad should check that the selector in the spend commitment
+    // is JOIN_SPLIT. And only handle the settle branch
+    // join_split and swaptoad both share the same selector on their check of what is committed in their spend commitments
+    // This allows swaptoad to only worry about the settlement
+    // and then join_split can do the cancel of the trade.
+    // atomictoad will do the same trick
+    join_split(circuit_comp_inputs);
+    swaptoad(circuit_comp_inputs);
+    // --------------- ------------------ ----------------
 
-    let pending_accounting_check: [CommitmentRecipientData; CIRCUIT_SIZE] = if (
-        priv_in.circuit_comp_selector == JOIN_SPLIT_SELECTOR
-    ) {
-        // TODO nullifier = h(nullifier_secret, giga_index, local_index)
-        // for commitment emitting multiple nullifiers like swap_maker_lock_contract needing closed_nullifier, timer_started_nullifier
-        // just add a nullifier slot number
-        join_split(circuit_comp_inputs)
-    } else if priv_in.circuit_comp_selector == SWAP_TOAD_SELECTOR {
-        swaptoad(circuit_comp_inputs)
-    } else {
-        assert(false, "unknown signed_data.circuit_component_selector");
-        std::mem::zeroed()
-    };
-
+    // @WARNING CONTAINS UNCONSTRAINT CODE
+    // TODO remove all unconstraint code and instead just put hints like that in the priv_inputs
     check_accounting(
-        pending_accounting_check,
+        circuit_comp_inputs.recipient_commitments,
         // circuit components can modify this incase of minting / creating new asset_ids / if accounting already checked somehow
         // but caller needs to be forced to leave those recipient commitments last
         circuit_comp_inputs.actual_amount_recipient_commitments,
@@ -378,13 +380,41 @@ fn main(
 
     // @WARNING every circuit component should either block unshield by doing assert(unshielding_commitment.asset_id == 0x00)
     // or correctly check accounting on these unshielding_commitments
-    for index in 0..CIRCUIT_SIZE {
-        let unshielding_commitment: UnshieldingCommitment = pub_in.unshielding_commitments[index];
-        let recipient_commitment: CommitmentRecipientData = priv_in.recipient_commitments[index];
+    for i in 0..CIRCUIT_SIZE {
+        let spend_commit: ProvenCommitment = circuit_comp_inputs.spend_commitments_and_roots[i];
+        let unshielding_commitment: UnshieldingCommitment = pub_in.unshielding_commitments[i];
+        let recipient_commitment: CommitmentRecipientData = priv_in.recipient_commitments[i];
+        let commit_hash: Field = pub_in.recipient_commitments_hashes[i];
+        let nullfier: Field = pub_in.nullifiers[i];
+
+        if (i < priv_in.actual_amount_spend_commitments) {
+            // if a unkown selector is used, then that spend is never check and cause infinite mint
+            assert(
+                (spend_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR)
+                    | (spend_commit.circuit_comp_selector == SWAP_TOAD_SELECTOR),
+                "spend commitment has a unknown circuit_comp_selector",
+            );
+            // circuit components still customized this
+            // TODO AT PER TX NULLIFIER BRANCH, do hashing here to save on constraints
+        } else {
+            assert(
+                nullfier == hash_fake_nullifier(spend_commit.shared_nonce),
+                "fake commitment hash mismatch",
+            );
+        }
 
         // only non fakes can unshield so only those get the asserts of:
         // unshielding_commitment.thing == recipient_commitment.thing
-        if (index < priv_in.actual_amount_recipient_commitments) {
+        if (i < priv_in.actual_amount_recipient_commitments) {
+            assert(
+                pub_in.recipient_commitments_hashes[i]
+                    == hash_commitment(
+                        recipient_commitment.pre_commitment_hash,
+                        recipient_commitment.asset_id,
+                        recipient_commitment.amount,
+                    ),
+                "recipient_commitments_hashes misatch",
+            );
             // now just check if pub inputs actually intent to unshield
             if (unshielding_commitment.asset_id != 0x00) {
                 assert(
@@ -408,6 +438,12 @@ fn main(
         } else {
             // fake is fake, no fake commitments unshielding into real money!!
             assert(unshielding_commitment.asset_id == 0x00, "fake slot cannot unshield");
+            // fake is still fake!! so let's make sure we never mix that up for the commitment hash and nullifier!!
+            // TODO his hash operation can be optimized so it shares a operation with a real hash, just constrain different inputs to distinguish it from a fake
+            assert(
+                commit_hash == hash_fake_commitment(recipient_commitment.shared_nonce),
+                "fake commitment hash mismatch",
+            );
         }
     }
 }
@@ -433,20 +469,14 @@ pub struct CircuitCompInputs<let SIZE: u32> {
     owner_hash: Field,
 }
 
-// TODO nothing in this that is signed binds to a specific commitment
-// a nice flexibility but maybe dangerous? Signing off on i want to trade a for b
-// and then suddenly they use a commitment you didn't intend on being spend is
-// not horrible. But might be awkward if you are already talking with another counter party
-// but that is not scary enough for me
-// simple fix is to only use one auth pubkey per live locked commitment!
+// @notice no amounts mentioned, which is blocker for partial fills
+// how ever partial fills can only work with in circuit constrain encryption
+// so only all or nothing orders is good for V1 for now
 pub struct SwapToadOrder {
-    listing_asset_id: Field,
-    listing_amount: Field,
-    payment_asset_id: Field,
-    payment_amount: Field,
+    maker_new_commit_hashes: [Field; SWAP_TOAD_ORDER_SIZE],
+    maker_spend_commit_hashes: [Field; SWAP_TOAD_ORDER_SIZE],
+    message_hashes: [Field; SWAP_TOAD_ORDER_SIZE],
     expiry: Field,
-    first_message_hash: Field,
-    maker_pre_commitment_hash: Field,
     owner_keys_hash: Field,
 }
 
@@ -474,339 +504,344 @@ fn check_root<let STRING_SIZE: u32, let SIZE: u32>(
     }
 }
 
+// TODO check not unshielding makers commitments
+fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
+    std::mem::zeroed()
+}
+
 // @notice: maker locks tokens into a toad_swap lock by creating commitments with circuit_comp_selector set to TOAD_SWAP_SELECTOR
 // and **any** value they want into circuit_comp_storage_hash!
 // this function is ran to proof a toad_swap is filled
-fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> [CommitmentRecipientData; SIZE] {
-    // @TODO WARNING: the assumption is that only 1 maker and 1 taker is in swaptoad
-    // and only 1 swaptoad happens per proof. Since check_accounting creates total per asset_id
-    // and does not care who owns that. So settling 2 swaptoads of the same asset_id of 2 different makers
-    // allows prover to just steal the change of one maker and send it to another maker!
-    // TLDR: "1 maker and 1 taker" + "1 swaptoad per proof", other wise STOLEN FUNDS
-    let locked_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[0];
-    // check root
-    check_root(locked_commitment, inputs, "locked_commitment");
-    // check selector
-    assert(
-        locked_commitment.circuit_comp_selector == SWAP_TOAD_SELECTOR,
-        "locked_commitment being spend needs it's circuit_comp_selector to be set to TOAD_SWAP_SELECTOR",
-    );
+// fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> [CommitmentRecipientData; SIZE] {
+//     // @TODO WARNING: the assumption is that only 1 maker and 1 taker is in swaptoad
+//     // and only 1 swaptoad happens per proof. Since check_accounting creates total per asset_id
+//     // and does not care who owns that. So settling 2 swaptoads of the same asset_id of 2 different makers
+//     // allows prover to just steal the change of one maker and send it to another maker!
+//     // TLDR: "1 maker and 1 taker" + "1 swaptoad per proof", other wise STOLEN FUNDS
+//     let locked_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[0];
+//     // check root
+//     check_root(locked_commitment, inputs, "locked_commitment");
+//     // check selector
+//     assert(
+//         locked_commitment.circuit_comp_selector == SWAP_TOAD_SELECTOR,
+//         "locked_commitment being spend needs it's circuit_comp_selector to be set to TOAD_SWAP_SELECTOR",
+//     );
 
-    // TODO document first slot is pubkey of signer of the order
-    let lock_storage: SwapToadStorage = SwapToadStorage {
-        auth: PubKey {
-            x: locked_commitment.circuit_comp_storage[0],
-            y: locked_commitment.circuit_comp_storage[1],
-        },
-        shared_nullifier_secret: locked_commitment.circuit_comp_storage[2],
-    };
-    let maker_change_commit: CommitmentRecipientData = inputs.recipient_commitments[0];
-    let mut taker_spend_nullfier: Field = 0x00;
-    let mut maker_new_commit_hash: Field = 0x00;
-    let mut taker_change_commit_hash: Field = 0x00;
-    let mut taker_new_commit_hash: Field = 0x00;
-    assert(
-        maker_change_commit.asset_id == locked_commitment.asset_id,
-        "maker_change_commit asset_id should always match the locked_commitment asset_id",
-    );
-    if (inputs.auth_sig_pubkey.x == 0x00) {
-        assert(
-            inputs.actual_amount_recipient_commitments == 1,
-            "Canceling a swaptoad trade can only create 1 new commitment",
-        );
-        assert(
-            locked_commitment.owner_hash == inputs.owner_hash,
-            "only owner can cancel a swaptoad trade",
-        );
-        // auth_sig_inputs set to zero? okay no signature was provided in private inputs of circuit.
-        // that means that owner of the commitment want to cancel
-        // they just want their money back so let's no ask them to verify their own signature and complete a trade
-        // with them selfs!
+//     // TODO document first slot is pubkey of signer of the order
+//     let lock_storage: SwapToadStorage = SwapToadStorage {
+//         auth: PubKey {
+//             x: locked_commitment.circuit_comp_storage[0],
+//             y: locked_commitment.circuit_comp_storage[1],
+//         },
+//         shared_nullifier_secret: locked_commitment.circuit_comp_storage[2],
+//     };
+//     let maker_change_commit: CommitmentRecipientData = inputs.recipient_commitments[0];
+//     let mut taker_spend_nullfier: Field = 0x00;
+//     let mut maker_new_commit_hash: Field = 0x00;
+//     let mut taker_change_commit_hash: Field = 0x00;
+//     let mut taker_new_commit_hash: Field = 0x00;
+//     assert(
+//         maker_change_commit.asset_id == locked_commitment.asset_id,
+//         "maker_change_commit asset_id should always match the locked_commitment asset_id",
+//     );
+//     if (inputs.auth_sig_pubkey.x == 0x00) {
+//         assert(
+//             inputs.actual_amount_recipient_commitments == 1,
+//             "Canceling a swaptoad trade can only create 1 new commitment",
+//         );
+//         assert(
+//             locked_commitment.owner_hash == inputs.owner_hash,
+//             "only owner can cancel a swaptoad trade",
+//         );
+//         // auth_sig_inputs set to zero? okay no signature was provided in private inputs of circuit.
+//         // that means that owner of the commitment want to cancel
+//         // they just want their money back so let's no ask them to verify their own signature and complete a trade
+//         // with them selfs!
 
-        // we only need to nullify the locked commitment, but this always needs to happen, so happens after this if/else block
-        // After this if/else block all after the second nullfier is nullified but not the second so let do that now
-        // TODO instead of making fakes here will be moved out once swaptoad scales with circuit size
-        // at that point, other commitments slots are handed to the other circuit component called
-        taker_spend_nullfier =
-            hash_fake_nullifier(inputs.spend_commitments_and_roots[1].shared_nonce);
-        assert(
-            maker_change_commit.amount == locked_commitment.amount,
-            "amount in the first new commitment needs to match amount locked",
-        );
-        // rest of the commitments hashes made should be fake
-        maker_new_commit_hash = hash_fake_commitment(inputs.recipient_commitments[1].shared_nonce);
-        taker_change_commit_hash =
-            hash_fake_commitment(inputs.recipient_commitments[2].shared_nonce);
-        taker_new_commit_hash = hash_fake_commitment(inputs.recipient_commitments[3].shared_nonce);
-    } else {
-        assert(
-            inputs.actual_amount_recipient_commitments == 4,
-            "A swaptoad fill can only create 4 new real commitment, rest needs to be fake!!",
-        );
-        let taker_spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[1];
-        let signed_order: SwapToadOrder = SwapToadOrder {
-            listing_asset_id: inputs.auth_sig_inputs[0],
-            listing_amount: inputs.auth_sig_inputs[1],
-            payment_asset_id: inputs.auth_sig_inputs[2],
-            payment_amount: inputs.auth_sig_inputs[3],
-            expiry: inputs.auth_sig_inputs[4],
-            // TODO we need 2 messages, for maker_change_commit and taker_change_commit
-            first_message_hash: inputs.auth_sig_inputs[5],
-            maker_pre_commitment_hash: inputs.auth_sig_inputs[6],
-            owner_keys_hash: inputs.auth_sig_inputs[7],
-        };
+//         // we only need to nullify the locked commitment, but this always needs to happen, so happens after this if/else block
+//         // After this if/else block all after the second nullfier is nullified but not the second so let do that now
+//         // TODO instead of making fakes here will be moved out once swaptoad scales with circuit size
+//         // at that point, other commitments slots are handed to the other circuit component called
+//         taker_spend_nullfier =
+//             hash_fake_nullifier(inputs.spend_commitments_and_roots[1].shared_nonce);
+//         assert(
+//             maker_change_commit.amount == locked_commitment.amount,
+//             "amount in the first new commitment needs to match amount locked",
+//         );
+//         // rest of the commitments hashes made should be fake
+//         maker_new_commit_hash = hash_fake_commitment(inputs.recipient_commitments[1].shared_nonce);
+//         taker_change_commit_hash =
+//             hash_fake_commitment(inputs.recipient_commitments[2].shared_nonce);
+//         taker_new_commit_hash = hash_fake_commitment(inputs.recipient_commitments[3].shared_nonce);
+//     } else {
+//         assert(
+//             inputs.actual_amount_recipient_commitments == 4,
+//             "A swaptoad fill can only create 4 new real commitment, rest needs to be fake!!",
+//         );
+//         let taker_spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[1];
+//         let signed_order: SwapToadOrder = SwapToadOrder {
+//             listing_asset_id: inputs.auth_sig_inputs[0],
+//             listing_amount: inputs.auth_sig_inputs[1],
+//             payment_asset_id: inputs.auth_sig_inputs[2],
+//             payment_amount: inputs.auth_sig_inputs[3],
+//             expiry: inputs.auth_sig_inputs[4],
+//             // TODO we need 2 messages, for maker_change_commit and taker_change_commit
+//             first_message_hash: inputs.auth_sig_inputs[5],
+//             maker_pre_commitment_hash: inputs.auth_sig_inputs[6],
+//             owner_keys_hash: inputs.auth_sig_inputs[7],
+//         };
 
-        assert(
-            signed_order.listing_asset_id != signed_order.payment_asset_id,
-            "listing and payment asset can not be the same",
-        );
+//         assert(
+//             signed_order.listing_asset_id != signed_order.payment_asset_id,
+//             "listing and payment asset can not be the same",
+//         );
 
-        assert(
-            inputs.proof_expire_time_stamp.lt(signed_order.expiry),
-            "Order expiry can not happen before the proof is expires.",
-        );
-        assert(
-            maker_change_commit.pre_commitment_hash == signed_order.maker_pre_commitment_hash,
-            "maker change commitment needs the specified maker_pre_commitment_hash from the signed swaptoad order",
-        );
-        // TODO maybe 2 message hashes (one per maker note) instead of one over messages[0..2], uncomplicates the wallet sdk
-        assert(
-            inputs.first_message_hash == signed_order.first_message_hash,
-            "first_message_hash does not match makers required first_message_hash from auth_sig_inputs",
-        );
-        // check auth sig actually belongs to that in the locked commitment storage
-        assert(
-            lock_storage.auth == inputs.auth_sig_pubkey,
-            "auth_pub_key.x does match the auth_pub_key_x from circuit_comp_storage in the locked_commitment",
-        );
-        // TODO can we join_split before settle?
-        // @notice we need this order because signed data checks the first 2 message hashes (maybe technically not needed to match but would make things wierd for sdk?)
-        let maker_new_commit: CommitmentRecipientData = inputs.recipient_commitments[1];
-        let taker_change_commit: CommitmentRecipientData = inputs.recipient_commitments[2];
-        let taker_new_commit: CommitmentRecipientData = inputs.recipient_commitments[3];
+//         assert(
+//             inputs.proof_expire_time_stamp.lt(signed_order.expiry),
+//             "Order expiry can not happen before the proof is expires.",
+//         );
+//         assert(
+//             maker_change_commit.pre_commitment_hash == signed_order.maker_pre_commitment_hash,
+//             "maker change commitment needs the specified maker_pre_commitment_hash from the signed swaptoad order",
+//         );
+//         // TODO maybe 2 message hashes (one per maker note) instead of one over messages[0..2], uncomplicates the wallet sdk
+//         assert(
+//             inputs.first_message_hash == signed_order.first_message_hash,
+//             "first_message_hash does not match makers required first_message_hash from auth_sig_inputs",
+//         );
+//         // check auth sig actually belongs to that in the locked commitment storage
+//         assert(
+//             lock_storage.auth == inputs.auth_sig_pubkey,
+//             "auth_pub_key.x does match the auth_pub_key_x from circuit_comp_storage in the locked_commitment",
+//         );
+//         // TODO can we join_split before settle?
+//         // @notice we need this order because signed data checks the first 2 message hashes (maybe technically not needed to match but would make things wierd for sdk?)
+//         let maker_new_commit: CommitmentRecipientData = inputs.recipient_commitments[1];
+//         let taker_change_commit: CommitmentRecipientData = inputs.recipient_commitments[2];
+//         let taker_new_commit: CommitmentRecipientData = inputs.recipient_commitments[3];
 
-        // this is the only case we need owner_keys_hash from a commitment that is spend
-        // join_split only checks owner_hash == owner_hash_from_main
-        // we cant check against the one from main since that is taker. not maker
-        // but now private inputs all have owner_keys_hash even tho we only need one
-        // TODO optimize!!
-        assert(
-            locked_commitment.owner_hash
-                == hash_owner(signed_order.owner_keys_hash, inputs.current_giga_index),
-            "giga_index mismatch in locked commitment. This locked commitment can only be spend on it's one giga_index it has. And the correct owner_keys_hash of maker needs to be provided.",
-        );
+//         // this is the only case we need owner_keys_hash from a commitment that is spend
+//         // join_split only checks owner_hash == owner_hash_from_main
+//         // we cant check against the one from main since that is taker. not maker
+//         // but now private inputs all have owner_keys_hash even tho we only need one
+//         // TODO optimize!!
+//         assert(
+//             locked_commitment.owner_hash
+//                 == hash_owner(signed_order.owner_keys_hash, inputs.current_giga_index),
+//             "giga_index mismatch in locked commitment. This locked commitment can only be spend on it's one giga_index it has. And the correct owner_keys_hash of maker needs to be provided.",
+//         );
 
-        // only one asset_id
-        // don't get it mixed up!
-        // maker sells asset_A for asset_B
-        // if anything left over gets asset_A as change and asset_B as new commitment
-        // new---
-        assert(
-            maker_new_commit.asset_id == signed_order.payment_asset_id,
-            "maker_new_commit asset_id mismatch with asset_id in signed_order.payment_asset_id",
-        );
-        // taker is doing the filling, and he should not mess with makers change and swap out asset_ids!
-        // before if/else block this is always checked with locked_commitment and locked_commitment is checked against signed order
-        // assert(
-        //     maker_change_commit.asset_id == signed_order.listing_asset_id,
-        //     "maker_change_commit asset_id mismatch with asset_id in signed_order.listing_asset_id",
-        // );
-        assert(
-            taker_change_commit.asset_id == signed_order.payment_asset_id,
-            "taker_change_commit asset_id mismatch with asset_id in signed_order.payment_asset_id",
-        );
-        assert(
-            taker_new_commit.asset_id == signed_order.listing_asset_id,
-            "taker_new_commit asset_id mismatch with asset_id in signed_order.listing_asset_id",
-        );
+//         // only one asset_id
+//         // don't get it mixed up!
+//         // maker sells asset_A for asset_B
+//         // if anything left over gets asset_A as change and asset_B as new commitment
+//         // new---
+//         assert(
+//             maker_new_commit.asset_id == signed_order.payment_asset_id,
+//             "maker_new_commit asset_id mismatch with asset_id in signed_order.payment_asset_id",
+//         );
+//         // taker is doing the filling, and he should not mess with makers change and swap out asset_ids!
+//         // before if/else block this is always checked with locked_commitment and locked_commitment is checked against signed order
+//         // assert(
+//         //     maker_change_commit.asset_id == signed_order.listing_asset_id,
+//         //     "maker_change_commit asset_id mismatch with asset_id in signed_order.listing_asset_id",
+//         // );
+//         assert(
+//             taker_change_commit.asset_id == signed_order.payment_asset_id,
+//             "taker_change_commit asset_id mismatch with asset_id in signed_order.payment_asset_id",
+//         );
+//         assert(
+//             taker_new_commit.asset_id == signed_order.listing_asset_id,
+//             "taker_new_commit asset_id mismatch with asset_id in signed_order.listing_asset_id",
+//         );
 
-        //spend --
-        assert(
-            locked_commitment.asset_id == signed_order.listing_asset_id,
-            "locked_commitment asset_id must match listing_asset_id of signed order",
-        );
-        assert(
-            taker_spend_commitment.asset_id == signed_order.payment_asset_id,
-            "taker_spend_commitment asset_id must match payment_asset_id of signed order",
-        );
-        assert(
-            taker_spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
-            "Only a join split commitment can fill a trade with taker_spend_commitment",
-        );
+//         //spend --
+//         assert(
+//             locked_commitment.asset_id == signed_order.listing_asset_id,
+//             "locked_commitment asset_id must match listing_asset_id of signed order",
+//         );
+//         assert(
+//             taker_spend_commitment.asset_id == signed_order.payment_asset_id,
+//             "taker_spend_commitment asset_id must match payment_asset_id of signed order",
+//         );
+//         assert(
+//             taker_spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
+//             "Only a join split commitment can fill a trade with taker_spend_commitment",
+//         );
 
-        // maker needs to be sure their new commiments build by taker are build properly
-        // a mismatch like example circuit_comp_storage set to a random number maker does not know
-        // and maker cant spend that commitment anymore!
-        // check owner_hash of maker. Since taker is acting on makers behalve
-        // taker can do what ever with thier commitments owner_hash
+//         // maker needs to be sure their new commiments build by taker are build properly
+//         // a mismatch like example circuit_comp_storage set to a random number maker does not know
+//         // and maker cant spend that commitment anymore!
+//         // check owner_hash of maker. Since taker is acting on makers behalve
+//         // taker can do what ever with thier commitments owner_hash
 
-        // owner_hash
-        assert(
-            maker_new_commit.owner_hash == locked_commitment.owner_hash,
-            "owner_hash needs to stay same for the maker_new_commit as the locked_commitment",
-        );
-        assert(
-            maker_change_commit.owner_hash == locked_commitment.owner_hash,
-            "owner_hash needs to stay same for the maker_change_commit as the locked_commitment",
-        );
+//         // owner_hash
+//         assert(
+//             maker_new_commit.owner_hash == locked_commitment.owner_hash,
+//             "owner_hash needs to stay same for the maker_new_commit as the locked_commitment",
+//         );
+//         assert(
+//             maker_change_commit.owner_hash == locked_commitment.owner_hash,
+//             "owner_hash needs to stay same for the maker_change_commit as the locked_commitment",
+//         );
 
-        // ciruit selector and storage
-        assert(
-            maker_new_commit.circuit_comp_input == std::mem::zeroed(),
-            "circuit_comp_storage must be empty on maker commitments",
-        );
-        assert(
-            maker_new_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
-            "circuit_comp_selecto must be set to JOIN_SPLIT for maker commitments",
-        );
-        assert(
-            maker_change_commit.circuit_comp_input == std::mem::zeroed(),
-            "circuit_comp_storage must be empty on maker commitments",
-        );
-        assert(
-            maker_change_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
-            "circuit_comp_selecto must be set to JOIN_SPLIT for maker commitments",
-        );
+//         // ciruit selector and storage (no need to check this)
+//         // assert(
+//         //     maker_new_commit.circuit_comp_input == std::mem::zeroed(),
+//         //     "circuit_comp_storage must be empty on maker commitments",
+//         // );
+//         // assert(
+//         //     maker_new_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
+//         //     "circuit_comp_selecto must be set to JOIN_SPLIT for maker commitments",
+//         // );
+//         // assert(
+//         //     maker_change_commit.circuit_comp_input == std::mem::zeroed(),
+//         //     "circuit_comp_storage must be empty on maker commitments",
+//         // );
+//         // assert(
+//         //     maker_change_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
+//         //     "circuit_comp_selecto must be set to JOIN_SPLIT for maker commitments",
+//         // );
 
-        // shared_nonce
-        assert(
-            maker_new_commit.shared_nonce
-                == hash_shared_nonce_swaptoad(lock_storage.shared_nullifier_secret, 0),
-            "shared_nonce has to be a hashed with hash_shared_nonce_swaptoad",
-        );
-        assert(
-            maker_change_commit.shared_nonce
-                == hash_shared_nonce_swaptoad(lock_storage.shared_nullifier_secret, 1),
-            "shared_nonce has to be a hashed with hash_shared_nonce_swaptoad",
-        );
+//         // shared_nonce
+//         assert(
+//             maker_new_commit.shared_nonce
+//                 == hash_shared_nonce_swaptoad(lock_storage.shared_nullifier_secret, 0),
+//             "shared_nonce has to be a hashed with hash_shared_nonce_swaptoad",
+//         );
+//         assert(
+//             maker_change_commit.shared_nonce
+//                 == hash_shared_nonce_swaptoad(lock_storage.shared_nullifier_secret, 1),
+//             "shared_nonce has to be a hashed with hash_shared_nonce_swaptoad",
+//         );
 
-        // check the new commitments exactly match the fill
-        // if there is change, `check_account` would already check amounts (but not ownership!)
-        assert(
-            maker_new_commit.amount == signed_order.payment_amount,
-            "maker_new_commit.amount mismatch",
-        );
-        assert(
-            taker_new_commit.amount == signed_order.listing_amount,
-            "taker_new_commit.amount mismatch",
-        );
+//         // check the new commitments exactly match the fill
+//         // if there is change, `check_account` would already check amounts (but not ownership!)
+//         assert(
+//             maker_new_commit.amount == signed_order.payment_amount,
+//             "maker_new_commit.amount mismatch",
+//         );
+//         assert(
+//             taker_new_commit.amount == signed_order.listing_amount,
+//             "taker_new_commit.amount mismatch",
+//         );
 
-        // check account already makes sure the change commits have a valid amount
-        // assert(
-        //     maker_change_commit.amount == locked_commitment.amount - signed_order.listing_amount,
-        //     "maker_change_commit.amount mismatch",
-        // );
-        // assert(
-        //     taker_change_commit.amount
-        //         == taker_spend_commitment.amount - signed_order.payment_amount,
-        //     "taker_change_commit.amount mismatch",
-        // );
+//         // check account already makes sure the change commits have a valid amount
+//         // assert(
+//         //     maker_change_commit.amount == locked_commitment.amount - signed_order.listing_amount,
+//         //     "maker_change_commit.amount mismatch",
+//         // );
+//         // assert(
+//         //     taker_change_commit.amount
+//         //         == taker_spend_commitment.amount - signed_order.payment_amount,
+//         //     "taker_change_commit.amount mismatch",
+//         // );
 
-        // done by check_accounting
-        // balance checks on the 2 commitments being spend
-        // assert(
-        //     greater_or_equal(locked_commitment.amount, taker_new_commit.amount),
-        //     "taker is taking more tokens then there are in the locked commitments",
-        // );
-        // assert(
-        //     greater_or_equal(taker_spend_commitment.amount, maker_new_commit.amount),
-        //     "maker is recieving more tokens then taker has in their taker_spend_commitment",
-        // );
+//         // done by check_accounting
+//         // balance checks on the 2 commitments being spend
+//         // assert(
+//         //     greater_or_equal(locked_commitment.amount, taker_new_commit.amount),
+//         //     "taker is taking more tokens then there are in the locked commitments",
+//         // );
+//         // assert(
+//         //     greater_or_equal(taker_spend_commitment.amount, maker_new_commit.amount),
+//         //     "maker is recieving more tokens then taker has in their taker_spend_commitment",
+//         // );
 
-        // locked_commitment was already checked above this if/else, since it is always spend
-        // but takers spend still needs a check
-        check_root(taker_spend_commitment, inputs, "taker_spend_commitment");
-        assert(
-            taker_spend_commitment.owner_hash == inputs.owner_hash,
-            "taker_spend_commitment is not spendable with this owner_signature",
-        );
-        taker_spend_nullfier = hash_nullifier(
-            inputs.nullifier_secret,
-            taker_spend_commitment.giga_leaf_index,
-            taker_spend_commitment.local_leaf_index,
-        );
+//         // locked_commitment was already checked above this if/else, since it is always spend
+//         // but takers spend still needs a check
+//         check_root(taker_spend_commitment, inputs, "taker_spend_commitment");
+//         assert(
+//             taker_spend_commitment.owner_hash == inputs.owner_hash,
+//             "taker_spend_commitment is not spendable with this owner_signature",
+//         );
+//         taker_spend_nullfier = hash_nullifier(
+//             inputs.nullifier_secret,
+//             taker_spend_commitment.giga_leaf_index,
+//             taker_spend_commitment.local_leaf_index,
+//         );
 
-        // makers commitments are special, since taker is creating them on their behalve
-        // so we alse check the pre_commitment!
+//         // makers commitments are special, since taker is creating them on their behalve
+//         // so we alse check the pre_commitment!
 
-        // TODO make this a function. "constrain_pre_commit()
-        assert(
-            maker_new_commit.pre_commitment_hash
-                == hash_pre_commitment(
-                    maker_new_commit.owner_hash,
-                    maker_new_commit.shared_nonce,
-                    maker_new_commit.circuit_comp_selector,
-                    hash_circuit_component_storage(maker_new_commit.circuit_comp_input),
-                ),
-            "maker_new_commit.pre_commitment_hash mismath with hashed values on fill",
-        );
+//         // TODO make this a function. "constrain_pre_commit()
+//         // assert(
+//         //     maker_new_commit.pre_commitment_hash
+//         //         == hash_pre_commitment(
+//         //             maker_new_commit.owner_hash,
+//         //             maker_new_commit.shared_nonce,
+//         //             maker_new_commit.circuit_comp_selector,
+//         //             hash_circuit_component_storage(maker_new_commit.circuit_comp_input),
+//         //         ),
+//         //     "maker_new_commit.pre_commitment_hash mismath with hashed values on fill",
+//         // );
 
-        // TODO i feel like we can hoist this out and save on more proof time
-        maker_new_commit_hash = hash_commitment(
-            maker_new_commit.pre_commitment_hash,
-            maker_new_commit.asset_id,
-            maker_new_commit.amount,
-        );
-        taker_change_commit_hash = hash_commitment(
-            taker_change_commit.pre_commitment_hash,
-            taker_change_commit.asset_id,
-            taker_change_commit.amount,
-        );
-        taker_new_commit_hash = hash_commitment(
-            taker_new_commit.pre_commitment_hash,
-            taker_new_commit.asset_id,
-            taker_new_commit.amount,
-        );
-    }
+//         // TODO i feel like we can hoist this out and save on more proof time
+//         maker_new_commit_hash = hash_commitment(
+//             maker_new_commit.pre_commitment_hash,
+//             maker_new_commit.asset_id,
+//             maker_new_commit.amount,
+//         );
+//         taker_change_commit_hash = hash_commitment(
+//             taker_change_commit.pre_commitment_hash,
+//             taker_change_commit.asset_id,
+//             taker_change_commit.amount,
+//         );
+//         taker_new_commit_hash = hash_commitment(
+//             taker_new_commit.pre_commitment_hash,
+//             taker_new_commit.asset_id,
+//             taker_new_commit.amount,
+//         );
+//     }
 
-    let maker_change_commit_hash: Field = hash_commitment(
-        maker_change_commit.pre_commitment_hash,
-        maker_change_commit.asset_id,
-        maker_change_commit.amount,
-    );
-    assert(
-        inputs.recipient_commitments_hashes[0] == maker_change_commit_hash,
-        "maker_change_commit_hash mismatch",
-    );
-    assert(
-        inputs.recipient_commitments_hashes[1] == maker_new_commit_hash,
-        "maker_new_commit_hash mismatch",
-    );
-    assert(
-        inputs.recipient_commitments_hashes[2] == taker_change_commit_hash,
-        "taker_change_commit_hash mismatch",
-    );
-    assert(
-        inputs.recipient_commitments_hashes[3] == taker_new_commit_hash,
-        "taker_new_commit_hash mismatch",
-    );
+//     let maker_change_commit_hash: Field = hash_commitment(
+//         maker_change_commit.pre_commitment_hash,
+//         maker_change_commit.asset_id,
+//         maker_change_commit.amount,
+//     );
+//     assert(
+//         inputs.recipient_commitments_hashes[0] == maker_change_commit_hash,
+//         "maker_change_commit_hash mismatch",
+//     );
+//     assert(
+//         inputs.recipient_commitments_hashes[1] == maker_new_commit_hash,
+//         "maker_new_commit_hash mismatch",
+//     );
+//     assert(
+//         inputs.recipient_commitments_hashes[2] == taker_change_commit_hash,
+//         "taker_change_commit_hash mismatch",
+//     );
+//     assert(
+//         inputs.recipient_commitments_hashes[3] == taker_new_commit_hash,
+//         "taker_new_commit_hash mismatch",
+//     );
 
-    // cancel or fill, locked_commitment always get's nullfied like this
-    let shared_nullifier: Field = hash_nullifier(
-        lock_storage.shared_nullifier_secret,
-        locked_commitment.giga_leaf_index,
-        locked_commitment.local_leaf_index,
-    );
-    assert(
-        inputs.nullifiers[0] == shared_nullifier,
-        "First nullifier needs to be hashed from the shared nullifier from circuit_comp_storage",
-    );
-    assert(
-        inputs.nullifiers[1] == taker_spend_nullfier,
-        "second nullfier does not match takers spend nullfier",
-    );
+//     // cancel or fill, locked_commitment always get's nullfied like this
+//     let shared_nullifier: Field = hash_nullifier(
+//         lock_storage.shared_nullifier_secret,
+//         locked_commitment.giga_leaf_index,
+//         locked_commitment.local_leaf_index,
+//     );
+//     assert(
+//         inputs.nullifiers[0] == shared_nullifier,
+//         "First nullifier needs to be hashed from the shared nullifier from circuit_comp_storage",
+//     );
+//     assert(
+//         inputs.nullifiers[1] == taker_spend_nullfier,
+//         "second nullfier does not match takers spend nullfier",
+//     );
 
-    // we only ever nullify max 2 commitment, 1 if cancel, 2 if fill, the rest should be fake
-    for i in 2..SIZE {
-        let fake_nullifier: Field =
-            hash_fake_nullifier(inputs.spend_commitments_and_roots[i].shared_nonce);
-        assert(
-            inputs.nullifiers[i] == fake_nullifier,
-            "fake nullifier mismatch. All nullifiers after the first 2 need to be fake when canceling or filling swaptoad commitment",
-        );
-    }
-    inputs.recipient_commitments
-}
+//     // we only ever nullify max 2 commitment, 1 if cancel, 2 if fill, the rest should be fake
+//     for i in 2..SIZE {
+//         let fake_nullifier: Field =
+//             hash_fake_nullifier(inputs.spend_commitments_and_roots[i].shared_nonce);
+//         assert(
+//             inputs.nullifiers[i] == fake_nullifier,
+//             "fake nullifier mismatch. All nullifiers after the first 2 need to be fake when canceling or filling swaptoad commitment",
+//         );
+//     }
+//     inputs.recipient_commitments
+// }
 
 // makes a array of indexes that point the same asset_id to the same index.
 // so [a,c,a,b] -> [0,1,0,3]
@@ -912,18 +947,21 @@ fn check_accounting<let SIZE: u32>(
 }
 
 // TODO dummy nullifiers and commitment_hashes
-fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> [CommitmentRecipientData; SIZE] {
+fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) {
     // only one asset at the time pls
-    let expected_asset_id: Field = inputs.spend_commitments_and_roots[0].asset_id;
+    // `check_accounting` keeps running totals per asset_id now
+    // so join_split no longer needs to care if you send a mix of asset_ids
+    // let expected_asset_id: Field = inputs.spend_commitments_and_roots[0].asset_id;
     // checked by `check_accounting` now
     // let mut spendable: Field = 0;
     // let mut spend: Field = 0;
     for index in 0..SIZE {
         // ----------- spend commitment --------------------------
         let spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[index];
-        let mut nullifier: Field = 0x00;
-        if (index < inputs.actual_amount_spend_commitments) {
-            // check root
+        if (spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
+            // commitment_range already does this for us (TODO isn't this a issue since that number came from unconstrained?)
+            //if (index < inputs.actual_amount_spend_commitments) {
+            // check root TODO hoist?
             if (spend_commitment.giga_root == 0x00) {
                 assert(
                     spend_commitment.local_root == inputs.local_root,
@@ -935,62 +973,52 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>) -> [CommitmentReci
                     "spend was *not* local and does not match giga_root from public inputs",
                 );
             }
-            // owner
+            // owner (typicaly costumized by circuit components)
             assert(
                 spend_commitment.owner_hash == inputs.owner_hash,
                 "Every spend commitment in join_split needs to have the owner_hash from the owner signature",
             );
-            // other checks
-            assert(
-                spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
-                "The first commitment in spend_commitments was set to JOIN_SPLIT, but another was found set to a different circuit component. Please only spend from one circuit component at a time.",
-            );
-            assert(
-                expected_asset_id == spend_commitment.asset_id,
-                "spend_commitments does not contain all same assetIds",
-            );
+            // assert(
+            //     expected_asset_id == spend_commitment.asset_id,
+            //     "spend_commitments does not contain all same assetIds",
+            // );
 
-            nullifier = hash_nullifier(
+            // nullifier (typicaly customized by circuit components)
+            let nullifier: Field = hash_nullifier(
                 inputs.nullifier_secret,
                 spend_commitment.giga_leaf_index,
                 spend_commitment.local_leaf_index,
             );
-            //spendable += spend_commitment.amount;
-        } else {
-            // we ignore it, and don't add it to spendable amount
-            // TODO make sure nullifier is fake and not trying to nullify someone else!
-            nullifier = hash_fake_nullifier(spend_commitment.shared_nonce);
+            assert(nullifier == inputs.nullifiers[index], "nullifier mismatch");
         }
-        assert(nullifier == inputs.nullifiers[index], "nullifier mismatch");
 
+        //spendable += spend_commitment.amount;
         // ------------- recipients commitment ----------------------------------------
-        let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
-        let mut recipient_commitment_hash: Field = 0x00;
-        if (index < inputs.actual_amount_recipient_commitments) {
-            assert(
-                expected_asset_id == recipient_commitment.asset_id,
-                "recipient_commitments does not contain all same assetIds",
-            );
+        // hoisted to main
+        //let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
+        //let mut recipient_commitment_hash: Field = 0x00;
+        //if (index < inputs.actual_amount_recipient_commitments) {
+        // assert(
+        //     expected_asset_id == recipient_commitment.asset_id,
+        //     "recipient_commitments does not contain all same assetIds",
+        // );
 
-            // track amounts
-            // spend += recipient_commitment.amount;
-            // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
-            // assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
+        // track amounts
+        // spend += recipient_commitment.amount;
+        // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
+        // assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
 
-            recipient_commitment_hash = hash_commitment(
-                recipient_commitment.pre_commitment_hash,
-                expected_asset_id,
-                recipient_commitment.amount,
-            );
-        } else {
-            // nothing spend
-            recipient_commitment_hash = hash_fake_commitment(recipient_commitment.shared_nonce);
-        }
-        assert(
-            recipient_commitment_hash == inputs.recipient_commitments_hashes[index],
-            "a commitment_hash from public inputs does not match the recipient_commitment inputs hashed in circuit",
-        );
+        // recipient_commitment_hash = hash_commitment(
+        //     recipient_commitment.pre_commitment_hash,
+        //     recipient_commitment.asset_id,
+        //     recipient_commitment.amount,
+        // );
+        //}
+
+        // assert(
+        //     recipient_commitment_hash == inputs.recipient_commitments_hashes[index],
+        //     "a commitment_hash from public inputs does not match the recipient_commitment inputs hashed in circuit",
+        // );
     }
     // assert(lower_or_equal(spend, spendable), "not enough funds");
-    inputs.recipient_commitments
 }

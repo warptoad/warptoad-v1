@@ -1,14 +1,19 @@
 use poseidon::poseidon2::Poseidon2;
 
-// asset_id, amount, expiry, ref_to_lock.
-// swaptoad needs 7-8 inputs, atomictoad needs atleast more then that!
-// So we do 11, that matches exactly 3 poseidon2 absorb rounds (3*4-1)
-pub global CIRCUIT_COMP_AUTH_SIZE: u32 = 11;
+
+pub global CIRCUIT_SIZE: u32 = 4;
+// taker needs atleast 1 slot free to get something in return so -1.
+// same number here is used for taker. So 3 asset_ids for 1. Or 1 asset_id for 3
+pub global SWAP_TOAD_ORDER_SIZE: u32 = CIRCUIT_SIZE-1;
+pub global SWAP_TOAD_MISC_AUTH_INPUTS:u32 = 2;
+// 3*order_size because maker want to sign either 3 commitment_hash to constrain payment (so ex recieve 3 different asset_ids)
+// Or sell 3 different asset_ids
+// then it also needs to contrain the public messages hashes in the case of recieving 3 payment commitments
+pub global CIRCUIT_COMP_AUTH_SIZE: u32 = 3*SWAP_TOAD_ORDER_SIZE+SWAP_TOAD_MISC_AUTH_INPUTS;
 pub global CIRCUIT_COMP_STORAGE_SIZE: u32 = 3;
 pub global CIRCUIT_COMP_STORAGE_EMPTY: [Field; CIRCUIT_COMP_STORAGE_SIZE] = std::mem::zeroed();
 pub global CIRCUIT_COMP_STORAGE_EMPTY_HASH: Field =
     Poseidon2::hash(CIRCUIT_COMP_STORAGE_EMPTY, CIRCUIT_COMP_STORAGE_SIZE);
-pub global CIRCUIT_SIZE: u32 = 4;
 // to match aztec note_hash_tree, also we need to put edge index at 2**40 - 1 there
 // no tree resets: at ~12M leaves/day 2^40 lasts ~250 years, quantum breaks bn254 first
 pub global MAX_TREE_DEPTH: u32 = 40;
