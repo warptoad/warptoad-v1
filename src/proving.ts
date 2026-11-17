@@ -148,8 +148,8 @@ export function hashNote(n: Note): bigint {
 }
 
 /**
- * a recipient slot of the circuit. join_split only looks at `pre_commitment_hash`, `asset_id` and `amount`, other
- * circuit components (swaptoad for the maker's notes) check the fields it was hashed from too. Fakes only need a nonce
+ * a recipient slot of the circuit. It only looks at `pre_commitment_hash`, `asset_id` and `amount`, plus `owner_hash`
+ * when the slot unshields. Fakes only need a nonce
  */
 export function recipientInput(n: Note): CommitmentRecipientDataInput {
     return {
@@ -214,7 +214,7 @@ export function authSigInputs(inputs: bigint[]): CircuitCompAuthSigInputs {
 
 /**
  * no auth signature: `pub_key.x == 0` is the sentinel the circuit skips the signature check on. join_split never
- * needs one, and for swaptoad it means the owner is cancelling their own lock
+ * needs one, and cancelling a swaptoad lock is a join_split spend too
  */
 export function noAuth(): AuthInputs {
     return {

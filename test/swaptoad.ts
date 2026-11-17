@@ -21,7 +21,7 @@ import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { parseUnits, type Address, type Hex } from "viem";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { Asset, Note, TimeStampsInput, WarptoadContract, WrapperERC20Contract, WrapperFactoryContract } from "../src/types.js";
-import { JOIN_SPLIT_SELECTOR } from "../src/constants.js";
+import { JOIN_SPLIT_SELECTOR, SWAP_TOAD_ORDER_SIZE } from "../src/constants.js";
 import {
     hashAssetId,
     hashFakeCommitment,
@@ -30,11 +30,13 @@ import {
     hashOwner,
     hashOwnerKeys,
     hashSpendSignatureInputs,
+    type CircuitCompAuthSigInputs,
     type CircuitCompStorage,
     type CircuitSizeFields,
     type PubKey,
 } from "../src/hashing.js";
 import {
+    authSigInputs,
     fakeNote,
     fakeSpendInput,
     hashNote,
@@ -48,6 +50,7 @@ import {
     spendInput,
     syncedTree,
     unshieldInput,
+    zeros,
 } from "../src/proving.js";
 import { assetOf, encodeWrapperArgs } from "../src/assets.js";
 import { publicHashOf } from "../src/messages.js";
@@ -212,6 +215,24 @@ export async function setupToken(
 /** what goes in a swaptoad lock's circuit_comp_storage: who may sign orders on it, and the secret that nullifies it */
 export function lockStorage(maker: Maker, sharedNullifierSecret: bigint): CircuitCompStorage {
     return [maker.orderPubKey.x, maker.orderPubKey.y, sharedNullifierSecret];
+}
+
+/**
+ * what a maker signs, see `SWAPTOAD_ORDER_OFFSETS` in circuits/src/main.nr: the hashes of the notes they want made, of the locks
+ * that pay for them, the message hashes, and when the order expires. Entry i of each list is slot i of the fill, a
+ * shorter list is padded with 0, which the circuit reads as "nothing of the maker's in this slot"
+ */
+export function swapToadOrder({ newCommitHashes, lockHashes, messageHashes, expiry }: {
+    newCommitHashes: bigint[];
+    lockHashes: bigint[];
+    messageHashes: bigint[];
+    expiry: bigint;
+}): CircuitCompAuthSigInputs {
+    function pad(hashes: bigint[]) {
+        if (hashes.length > SWAP_TOAD_ORDER_SIZE) throw new Error(`${hashes.length} hashes, an order takes ${SWAP_TOAD_ORDER_SIZE}`);
+        return [...hashes, ...zeros(SWAP_TOAD_ORDER_SIZE - hashes.length)];
+    }
+    return authSigInputs([...pad(newCommitHashes), ...pad(lockHashes), ...pad(messageHashes), expiry]);
 }
 
 /** `Warptoad.shield` from `wallet`'s wrapper balance. shield takes any pre_commitment_hash, so this makes locks too */

@@ -3,8 +3,8 @@
  *
  *   1. alice wraps 400 USDC and shields it straight into a swaptoad lock, bob wraps 500 DAI and shields it as a
  *      normal note
- *   2. alice signs an order on the lock, 300 USDC for 200 DAI, and bob fills it: 4 new notes, bob builds alice's
- *      two from the lock's shared secret
+ *   2. alice signs an order on the lock: the hashes of the two notes she wants out of it, 200 DAI and 100 USDC of
+ *      change. bob fills it with his DAI and keeps what is left of the lock, 300 USDC
  *   3. alice unshields the 200 DAI bob made for her and unwraps it, bob does the same with his 300 USDC
  *
  * A lock is a note with circuit_comp_selector = SWAP_TOAD_SELECTOR and, in circuit_comp_storage, the pubkey that
@@ -24,17 +24,14 @@ import {
     hashCircuitComponentAuthSig,
     hashFakeNullifier,
     hashNullifier,
-    hashSharedNonceSwaptoad,
     hashSpendSignatureInputs,
     type CircuitSizeFields,
 } from "../src/hashing.js";
 import {
-    authSigInputs,
     fakeSpendInput,
     hashNote,
     merkleProofInput,
     noUnshield,
-    preCommitmentHashOf,
     prove,
     pubRoots,
     recipientInput,
@@ -51,6 +48,7 @@ import {
     setupToken,
     shieldNote,
     signMessage,
+    swapToadOrder,
     unshieldAndUnwrap,
     USDC,
     type TokenSide,
@@ -62,7 +60,7 @@ describe("ClaudesLilSwapToadFill", async function () {
     let usdc: TokenSide;
     let dai: TokenSide;
 
-    // the lock's shared secret: it nullifies the lock and seeds the nonces of alice's notes on the fill
+    // the lock's shared secret: it nullifies the lock, alice hands it to bob with the order
     const lockSecret = nonce(0x5ec2);
     let lock: Note;
     let bobDai: Note;
@@ -103,43 +101,39 @@ describe("ClaudesLilSwapToadFill", async function () {
         const { proof: daiProof } = merkleProofInput(localTree, hashNote(bobDai));
         const ts = await w.timeStamps();
 
-        // ---- alice's side, all of it before bob shows up: the order, and the two notes bob will make for her.
+        // ---- alice's side, all of it before bob shows up: the two notes she wants out of the fill, and the order.
         // She sells 300 of the 400 locked USDC for 200 DAI, so 1.5 USDC per DAI. Amounts are raw integers in each
         // token's own decimals, the circuit never compares across assets so the different decimals don't matter to it
         const listingAmount = USDC("300");
         const paymentAmount = DAI("200");
-        // their nonces come from the lock's secret so bob can't pick them, type 0 is the payment, 1 the change
-        alicePayment = {
-            ownerHash: alice.ownerHash,
-            sharedNonce: hashSharedNonceSwaptoad({ sharedNullifierSecret: lockSecret, commitmentType: 0n }),
-            assetId: dai.id,
-            amount: paymentAmount,
+        alicePayment = { 
+            ownerHash: alice.ownerHash, 
+            sharedNonce: nonce(1003), 
+            assetId: dai.id, 
+            amount: paymentAmount 
         };
-        const aliceChange: Note = {
-            ownerHash: alice.ownerHash,
-            sharedNonce: hashSharedNonceSwaptoad({ sharedNullifierSecret: lockSecret, commitmentType: 1n }),
-            assetId: usdc.id,
-            amount: lock.amount - listingAmount,
+        const aliceChange: Note = { 
+            
+            ownerHash: alice.ownerHash, 
+            sharedNonce: nonce(1004), 
+            assetId: usdc.id, 
+            amount: lock.amount - listingAmount 
         };
-        // `SwapToadOrder` in circuits/src/main.nr, in the order the maker signs it. The order must outlive the proof.
-        // first_message_hash pins messages[0] and [1], where the notes for aliceChange and alicePayment would go.
-        // The owner keys hash is what lets the circuit check the lock is on this chain's giga index
-        const order = authSigInputs([
-            usdc.id,
-            listingAmount,
-            dai.id,
-            paymentAmount,
-            ts.proof_expire_time_stamp + 3600n,
-            FIRST_MESSAGE_HASH,
-            preCommitmentHashOf(aliceChange),
-            alice.ownerKeysHash,
-        ]);
+        // the order has no amounts or prices in it: alice signs the hashes of her two notes and of the lock that pays
+        // for them, whatever is left of the lock is the taker's. All or nothing, the order must outlive the proof.
+        // first_message_hash pins messages[0] and [1], where the notes for aliceChange and alicePayment would go
+        const order = swapToadOrder({
+            newCommitHashes: [hashNote(aliceChange), hashNote(alicePayment)],
+            lockHashes: [hashNote(lock)],
+            messageHashes: [FIRST_MESSAGE_HASH],
+            expiry: ts.proof_expire_time_stamp + 3600n,
+        });
         const orderSig = signMessage(alice.orderKey, hashCircuitComponentAuthSig({ authSigInputs: order }));
 
-        // ---- bob's side: alice handed him the order, its signature and lockSecret
+        // ---- bob's side: alice handed him the order, its signature, lockSecret and her two notes
         const bobChange: Note = { ownerHash: bob.ownerHash, sharedNonce: nonce(2001), assetId: dai.id, amount: bobDai.amount - paymentAmount };
         bobUsdc = { ownerHash: bob.ownerHash, sharedNonce: nonce(2002), assetId: usdc.id, amount: listingAmount };
-        // slot order is fixed by the circuit: maker change, maker payment, taker change, taker payment
+        // alice's notes and her lock sit in the slots her order names them in, the rest is bob's
         const recipients = [aliceChange, alicePayment, bobChange, bobUsdc];
         const recipientHashes = recipients.map(hashNote) as CircuitSizeFields;
         const nullifiers = [

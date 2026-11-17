@@ -3,8 +3,14 @@
  */
 import { poseidon2Hash } from "@zkpassport/poseidon2";
 
-// swaptoad needs 8 inputs, atomictoad more. 11 is exactly 3 poseidon2 absorb rounds (3*4-1)
-export const CIRCUIT_COMP_AUTH_SIZE = 11;
+export const CIRCUIT_SIZE = 4;
+// a swaptoad order names at most this many of the maker's locks, new notes and message hashes.
+// the last nullifier is left for the taker's payment
+export const SWAP_TOAD_ORDER_SIZE = CIRCUIT_SIZE - 1;
+// the order's expiry
+export const SWAP_TOAD_MISC_AUTH_INPUTS = 1;
+// what a swaptoad maker signs: new note hashes, lock hashes and message hashes, then the misc inputs
+export const CIRCUIT_COMP_AUTH_SIZE = 3 * SWAP_TOAD_ORDER_SIZE + SWAP_TOAD_MISC_AUTH_INPUTS;
 export const CIRCUIT_COMP_STORAGE_SIZE = 3;
 export const CIRCUIT_COMP_STORAGE_EMPTY: readonly bigint[] = Object.freeze(
     new Array<bigint>(CIRCUIT_COMP_STORAGE_SIZE).fill(0n),
@@ -12,7 +18,6 @@ export const CIRCUIT_COMP_STORAGE_EMPTY: readonly bigint[] = Object.freeze(
 export const CIRCUIT_COMP_STORAGE_EMPTY_HASH: bigint = poseidon2Hash([
     ...CIRCUIT_COMP_STORAGE_EMPTY,
 ]);
-export const CIRCUIT_SIZE = 4;
 // to match aztec note_hash_tree, also we need to put edge index at 2**40 - 1 there
 // no tree resets: at ~12M leaves/day 2^40 lasts ~250 years, quantum breaks bn254 first
 export const MAX_TREE_DEPTH = 40;

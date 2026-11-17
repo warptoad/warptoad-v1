@@ -547,7 +547,7 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>, spend_selector: Fiel
             let in_message_hash: Field = inputs.first_message_hash;
 
             // TODO make the rename from recipient_commitment -> new_commit. And do spend_commit
-            if (maker_new_commit == 0x00) {
+            if (maker_new_commit != 0x00) {
                 assert(
                     (maker_new_commit == in_new_commit_hash),
                     "expected maker_new_commit hash does not line up with new_commit_hashes in public inputs",

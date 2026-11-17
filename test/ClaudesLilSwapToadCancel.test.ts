@@ -2,7 +2,8 @@
  * A swaptoad lock that gets cancelled, all on one chain:
  *
  *   1. alice wraps 400 USDC and shields it straight into a swaptoad lock
- *   2. alice cancels the lock: no order signature, the 400 come back to her as a plain note
+ *   2. alice cancels the lock with a plain join_split spend: no order signature, the 400 come back to her as a
+ *      plain note
  *   3. alice unshields that note and unwraps it
  *
  * A lock is a note with circuit_comp_selector = SWAP_TOAD_SELECTOR and, in circuit_comp_storage, the pubkey that
@@ -16,7 +17,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 import type { Note } from "../src/types.js";
-import { SWAP_TOAD_SELECTOR } from "../src/constants.js";
+import { JOIN_SPLIT_SELECTOR, SWAP_TOAD_SELECTOR } from "../src/constants.js";
 import { hashFakeCommitment, hashFakeNullifier, hashNullifier, hashSpendSignatureInputs, type CircuitSizeFields } from "../src/hashing.js";
 import { fakeNote, fakeSpendInput, hashNote, merkleProofInput, noAuth, noUnshield, prove, pubRoots, recipientInput, spendInput } from "../src/proving.js";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
@@ -122,9 +123,10 @@ describe("ClaudesLilSwapToadCancel", async function () {
                     nullifier_secret: alice.nullifierSecret,
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
-                // no auth signature is how the circuit tells a cancel from a fill, the owner signature is enough
+                // a cancel is a join_split spend of the lock: the owner signature is enough, no order needed.
+                // join_split sees the lock's selector and nullifies it with the shared secret
                 auth: noAuth(),
-                circuit_comp_selector: SWAP_TOAD_SELECTOR,
+                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
             },
         });
 
