@@ -2,10 +2,32 @@ use poseidon::poseidon2::Poseidon2;
 
 
 pub global CIRCUIT_SIZE: u32 = 4;
-// taker needs atleast 1 slot free to get something in return so -1.
-// same number here is used for taker. So 3 asset_ids for 1. Or 1 asset_id for 3
+// ORDER SIZE is limited by the max amount of nullifiers emitted
+// 3x nullifiers to spend 3 maker commitments. Then 1x nullifier to spend takers payement commitment
+// But do remember that a maker making a order with 3 different asset_ids, all partially spend commitments
+// will cause 3 change commitments being made for maker. That is 3x3 new commitments, not possible to fill!
+// TLDR: bigger then 1 order_size = nft only / all fully spend commitments
+
+// --- TODO for the "fee abstraction" use case. make circuit size for spends 4 but new_commits 6: ---
+// ex: DAI -> USDC. But no eth for gas
+//-------------------------------------------
+// maker spend: 150 USDC
+// maker spend: 1 ETH
+// taker spend: 100 DAI
+// ----total commits spend/nullified: 3 ----
+// taker takes:     0.0005 ETH (unshielded,spend for gas)
+// taker takes:     0.00002345 ETH reshielded after gas spend had something left over
+// taker takes:     99 USDC (the trade they wanted)
+// maker takes:     100 DAI (trade they provided)
+// maker change:    0.9995 ETH
+// maker change:    51 USDC
+// ---- total new commits created: 6 -------
+// Nullifiers are also more limited when doing frame txs. Since they are a constraint on spendability.
+// And therefor are part of the verification frame. Which has tight af limits
+
+// but not other way around. 
 pub global SWAP_TOAD_ORDER_SIZE: u32 = CIRCUIT_SIZE-1;
-pub global SWAP_TOAD_MISC_AUTH_INPUTS:u32 = 2;
+pub global SWAP_TOAD_MISC_AUTH_INPUTS:u32 = 1;
 // 3*order_size because maker want to sign either 3 commitment_hash to constrain payment (so ex recieve 3 different asset_ids)
 // Or sell 3 different asset_ids
 // then it also needs to contrain the public messages hashes in the case of recieving 3 payment commitments
