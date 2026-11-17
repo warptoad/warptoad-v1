@@ -9,7 +9,8 @@
  *
  * A lock is a note with circuit_comp_selector = SWAP_TOAD_SELECTOR and, in circuit_comp_storage, the pubkey that
  * signs orders on it plus a shared nullifier secret. The lock is nullified with that secret, not the owner's, so
- * whoever gets the secret with the order can spend the lock, but only the way the order says.
+ * whoever is handed the lock with an order can spend it, but only the way the order says.
+ * Step 2 spells out what alice hands bob, and bob uses nothing else of hers.
  * The cancel is ClaudesLilSwapToadCancel.test.ts.
  *
  * Needs `pnpm noir` first. Also runs on sepolia, see test/swaptoad.ts:
@@ -22,6 +23,7 @@ import type { Note } from "../src/types.js";
 import { SWAP_TOAD_SELECTOR } from "../src/constants.js";
 import {
     hashCircuitComponentAuthSig,
+    hashCommitment,
     hashFakeNullifier,
     hashNullifier,
     hashSpendSignatureInputs,
@@ -35,6 +37,8 @@ import {
     prove,
     pubRoots,
     recipientInput,
+    sealedRecipientInput,
+    sealNote,
     spendInput,
 } from "../src/proving.js";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
@@ -43,6 +47,7 @@ import {
     DAI,
     FIRST_MESSAGE_HASH,
     lockStorage,
+    lockStorageOf,
     privateTx,
     PUBLIC_HASH,
     setupToken,
@@ -60,7 +65,7 @@ describe("ClaudesLilSwapToadFill", async function () {
     let usdc: TokenSide;
     let dai: TokenSide;
 
-    // the lock's shared secret: it nullifies the lock, alice hands it to bob with the order
+    // the lock's shared secret: it nullifies the lock. It sits in the lock's storage, so bob gets it with the lock
     const lockSecret = nonce(0x5ec2);
     let lock: Note;
     let bobDai: Note;
@@ -96,9 +101,6 @@ describe("ClaudesLilSwapToadFill", async function () {
     });
 
     it("2. bob fills alice's order: 300 of the locked USDC for 200 DAI", async () => {
-        const localTree = await w.tree();
-        const { proof: lockProof, edgeIndex } = merkleProofInput(localTree, hashNote(lock));
-        const { proof: daiProof } = merkleProofInput(localTree, hashNote(bobDai));
         const ts = await w.timeStamps();
 
         // ---- alice's side, all of it before bob shows up: the two notes she wants out of the fill, and the order.
@@ -129,22 +131,35 @@ describe("ClaudesLilSwapToadFill", async function () {
             expiry: ts.proof_expire_time_stamp + 3600n,
         });
         const orderSig = signMessage(alice.orderKey, hashCircuitComponentAuthSig({ authSigInputs: order }));
+        // everything alice hands bob. The lock goes in full: he has to prove it is in the tree, and its storage holds
+        // the key that signs orders on it and the secret that nullifies it. Her two new notes go sealed: the pre
+        // commitment hash, asset and amount the circuit reads from a recipient slot, so not their nonces
+        const fromAlice = { lock, order, orderSig, change: sealNote(aliceChange), payment: sealNote(alicePayment) };
 
-        // ---- bob's side: alice handed him the order, its signature, lockSecret and her two notes
-        const bobChange: Note = { ownerHash: bob.ownerHash, sharedNonce: nonce(2001), assetId: dai.id, amount: bobDai.amount - paymentAmount };
-        bobUsdc = { ownerHash: bob.ownerHash, sharedNonce: nonce(2002), assetId: usdc.id, amount: listingAmount };
+        // ---- bob's side: `fromAlice`, his own DAI note and what is on chain. Nothing else of alice's
+        const { orderPubKey, sharedNullifierSecret } = lockStorageOf(fromAlice.lock);
+        const localTree = await w.tree();
+        const { proof: lockProof, edgeIndex } = merkleProofInput(localTree, hashNote(fromAlice.lock));
+        const { proof: daiProof } = merkleProofInput(localTree, hashNote(bobDai));
+        // he pays what her payment note asks for, and keeps what her change note leaves of the lock
+        const bobChange: Note = { ownerHash: bob.ownerHash, sharedNonce: nonce(2001), assetId: dai.id, amount: bobDai.amount - fromAlice.payment.amount };
+        bobUsdc = { ownerHash: bob.ownerHash, sharedNonce: nonce(2002), assetId: usdc.id, amount: fromAlice.lock.amount - fromAlice.change.amount };
         // alice's notes and her lock sit in the slots her order names them in, the rest is bob's
-        const recipients = [aliceChange, alicePayment, bobChange, bobUsdc];
-        const recipientHashes = recipients.map(hashNote) as CircuitSizeFields;
+        const recipientHashes = [
+            hashCommitment(fromAlice.change),
+            hashCommitment(fromAlice.payment),
+            hashNote(bobChange),
+            hashNote(bobUsdc),
+        ] as CircuitSizeFields;
         const nullifiers = [
-            hashNullifier({ nullifierSecret: lockSecret, gigaLeafIndex: gigaIndex, localLeafIndex: lockProof.index }),
+            hashNullifier({ nullifierSecret: sharedNullifierSecret, gigaLeafIndex: gigaIndex, localLeafIndex: lockProof.index }),
             hashNullifier({ nullifierSecret: bob.nullifierSecret, gigaLeafIndex: gigaIndex, localLeafIndex: daiProof.index }),
             hashFakeNullifier({ nonce: nonce(2003) }),
             hashFakeNullifier({ nonce: nonce(2004) }),
         ] as CircuitSizeFields;
         const sigHash = hashSpendSignatureInputs({
             publicHash: PUBLIC_HASH,
-            spendCommitmentHashes: [hashNote(lock), hashNote(bobDai), 0n, 0n],
+            spendCommitmentHashes: [hashNote(fromAlice.lock), hashNote(bobDai), 0n, 0n],
             recipientCommitmentHashes: recipientHashes,
         });
         const sig = signMessage(bob.eddsaKey, sigHash);
@@ -160,12 +175,15 @@ describe("ClaudesLilSwapToadFill", async function () {
                 recipient_commitments_hashes: recipientHashes,
             },
             priv_in: {
-                recipient_commitments: recipients.map(function (n) {
-                    return recipientInput(n);
-                }),
+                recipient_commitments: [
+                    sealedRecipientInput(fromAlice.change),
+                    sealedRecipientInput(fromAlice.payment),
+                    recipientInput(bobChange),
+                    recipientInput(bobUsdc),
+                ],
                 actual_amount_recipient_commitments: 4,
                 spend_commitments: [
-                    spendInput(lock, usdc.asset, lockProof, edgeIndex),
+                    spendInput(fromAlice.lock, usdc.asset, lockProof, edgeIndex),
                     spendInput(bobDai, dai.asset, daiProof, edgeIndex),
                     fakeSpendInput(nonce(2003)),
                     fakeSpendInput(nonce(2004)),
@@ -178,9 +196,9 @@ describe("ClaudesLilSwapToadFill", async function () {
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: {
-                    pub_key: alice.orderPubKey,
-                    signature: { x: orderSig.R8[0], y: orderSig.R8[1], scalar: orderSig.S },
-                    inputs: order,
+                    pub_key: orderPubKey,
+                    signature: { x: fromAlice.orderSig.R8[0], y: fromAlice.orderSig.R8[1], scalar: fromAlice.orderSig.S },
+                    inputs: fromAlice.order,
                 },
                 circuit_comp_selector: SWAP_TOAD_SELECTOR,
             },

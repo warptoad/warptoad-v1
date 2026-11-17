@@ -25,6 +25,7 @@ import type {
     MerkleProofInput,
     Note,
     PubRootsAndIndexesInput,
+    SealedNote,
     UnshieldingCommitmentInput,
 } from "./types.js";
 
@@ -160,6 +161,27 @@ export function recipientInput(n: Note): CommitmentRecipientDataInput {
         asset_id: n.assetId,
         amount: n.amount,
         pre_commitment_hash: preCommitmentHashOf(n),
+    };
+}
+
+/** `n` the way its owner hands it to someone who has to make it for them. `hashCommitment` of it is the leaf */
+export function sealNote(n: Note): SealedNote {
+    return { preCommitmentHash: preCommitmentHashOf(n), assetId: n.assetId, amount: n.amount };
+}
+
+/**
+ * a recipient slot for a note that was handed over sealed. The fields the prover was never told stay 0, the circuit
+ * doesn't read them. Not for an unshield: that slot's `owner_hash` has to be the address unshielded to
+ */
+export function sealedRecipientInput(n: SealedNote): CommitmentRecipientDataInput {
+    return {
+        owner_hash: 0n,
+        shared_nonce: 0n,
+        circuit_comp_selector: 0n,
+        circuit_comp_input: [...CIRCUIT_COMP_STORAGE_EMPTY],
+        asset_id: n.assetId,
+        amount: n.amount,
+        pre_commitment_hash: n.preCommitmentHash,
     };
 }
 

@@ -217,6 +217,13 @@ export function lockStorage(maker: Maker, sharedNullifierSecret: bigint): Circui
     return [maker.orderPubKey.x, maker.orderPubKey.y, sharedNullifierSecret];
 }
 
+/** `lockStorage` read back, by a taker who was handed the lock */
+export function lockStorageOf(lock: Note): { orderPubKey: PubKey; sharedNullifierSecret: bigint } {
+    if (lock.circuitCompStorage === undefined) throw new Error("not a swaptoad lock, it has no circuit_comp_storage");
+    const [x, y, sharedNullifierSecret] = lock.circuitCompStorage;
+    return { orderPubKey: { x, y }, sharedNullifierSecret };
+}
+
 /**
  * what a maker signs, see `SWAPTOAD_ORDER_OFFSETS` in circuits/src/main.nr: the hashes of the notes they want made, of the locks
  * that pay for them, the message hashes, and when the order expires. Entry i of each list is slot i of the fill, a

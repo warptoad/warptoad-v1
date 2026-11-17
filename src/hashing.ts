@@ -90,7 +90,7 @@ export function hashPreCommitment({
  * `hash_owner_keys`: Poseidon2([spend_pub_key.x, spend_pub_key.y, nullifier_secret])
  *
  * The chain independent half of an owner hash. Telling someone this reveals which giga index every
- * owner hash of yours is on, so only share it when that is fine (a swaptoad maker gives it to the taker)
+ * owner hash of yours is on, so only share it when that is fine
  */
 export function hashOwnerKeys({ spendPubKey, nullifierSecret }: { spendPubKey: PubKey; nullifierSecret: bigint }): bigint {
     return poseidon2Hash([spendPubKey.x, spendPubKey.y, nullifierSecret]);

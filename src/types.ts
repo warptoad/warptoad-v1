@@ -27,6 +27,12 @@ export type Note = {
     circuitCompStorage?: CircuitCompStorage;
 };
 
+/**
+ * a note with its owner hash and nonce kept behind the pre commitment hash. It is all the circuit reads from a
+ * recipient slot, so it is all someone else needs to make the note for you: a swaptoad maker hands these to the taker
+ */
+export type SealedNote = { preCommitmentHash: bigint; assetId: bigint; amount: bigint };
+
 // ------ mirrors of the structs in circuits/src/main.nr ------
 // snake_case on purpose: these are handed to noir_js as is
 
