@@ -1,6 +1,5 @@
 use poseidon::poseidon2::Poseidon2;
 
-
 pub global CIRCUIT_SIZE: u32 = 4;
 // ORDER SIZE is limited by the max amount of nullifiers emitted
 // 3x nullifiers to spend 3 maker commitments. Then 1x nullifier to spend takers payement commitment
@@ -25,13 +24,15 @@ pub global CIRCUIT_SIZE: u32 = 4;
 // Nullifiers are also more limited when doing frame txs. Since they are a constraint on spendability.
 // And therefor are part of the verification frame. Which has tight af limits
 
-// but not other way around. 
-pub global SWAP_TOAD_ORDER_SIZE: u32 = CIRCUIT_SIZE-1;
-pub global SWAP_TOAD_MISC_AUTH_INPUTS:u32 = 1;
+// but not other way around.
+pub global SWAP_TOAD_ORDER_SIZE: u32 = CIRCUIT_SIZE - 1;
+pub global SWAP_TOAD_MISC_AUTH_INPUTS: u32 = 1;
 // 3*order_size because maker want to sign either 3 commitment_hash to constrain payment (so ex recieve 3 different asset_ids)
 // Or sell 3 different asset_ids
 // then it also needs to contrain the public messages hashes in the case of recieving 3 payment commitments
-pub global CIRCUIT_COMP_AUTH_SIZE: u32 = 3*SWAP_TOAD_ORDER_SIZE+SWAP_TOAD_MISC_AUTH_INPUTS;
+pub global NON_CIRCTUIT_COMP_AUTH_INPUTS: u32 = 1;
+pub global CIRCUIT_COMP_AUTH_SIZE: u32 =
+    NON_CIRCTUIT_COMP_AUTH_INPUTS + 3 * SWAP_TOAD_ORDER_SIZE + SWAP_TOAD_MISC_AUTH_INPUTS;
 pub global CIRCUIT_COMP_STORAGE_SIZE: u32 = 3;
 pub global CIRCUIT_COMP_STORAGE_EMPTY: [Field; CIRCUIT_COMP_STORAGE_SIZE] = std::mem::zeroed();
 pub global CIRCUIT_COMP_STORAGE_EMPTY_HASH: Field =
@@ -53,5 +54,7 @@ pub global SWAP_TIMER_NULLIFIER_SLOT: Field = 0x01;
 
 // let unPadded = [...new TextEncoder().encode("FAKE_NULLIFIER")].map(b=>b.toString(16));
 //     "0x" + [...new Array(32-unPadded.length).fill("00"), ...unPadded].join("");
-pub global FAKE_NULLIFIER_DOMAIN: Field = 0x00000000000000000000000000000000000046414b455f4e554c4c4946494552;
-pub global FAKE_COMMITMENT_DOMAIN: Field = 0x000000000000000000000000000000000046414b455f434f4d4d49544d454e54;
+pub global FAKE_NULLIFIER_DOMAIN: Field =
+    0x00000000000000000000000000000000000046414b455f4e554c4c4946494552;
+pub global FAKE_COMMITMENT_DOMAIN: Field =
+    0x000000000000000000000000000000000046414b455f434f4d4d49544d454e54;

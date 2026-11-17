@@ -21,21 +21,24 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  * their chain or pubKey       pre_commitment_hash         \                                
  *         \                  /   |      \       \          \                            
  *        ----owner_hash------  shared_  CIRCUIT_ \   wraptoad.sol -> poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )         # for permissioned shielded minting, we should do poseidon here so circuit can do it. + we need to tell wrapperFactoryAddr that it was minted in shielded (so you can block unwrapping), maybe timestamp the mint in asset_id so wrapper factory can refuse unshields of mints passed a time window. Also kind of need a account based note to track total amount minted, 
- *        / |       |        \   nonce   CONTRACT  \                                                      \                       |                                 # for permissionless / ico / payed mints/ we need a different way of thinking. 1. Shielded pay + commit to future time stamp. 2. read randao at that time stamp + mint + commitment has timestamp, then offchain + wrapperFactory derives attribute from that randao as seed.
- *       / /        |         \      |              circuit_component_storage_hash        wraptoad.sol -> keccak(wrapperFactoryAddr,_wrapperAssetHash)        
- *  spending  dest_giga_index  \   to blind commit                            |                                                                    |
- *   PubKey                     \                                             |                                       wrapperfactory.sol -> erc20=keccak(wrapperAddr,underlyingAddr), erc721=keccak(wrapperAddr,underlyingAddr, id)
- *   X and y                   nullifier_secret                           # ex in join_split: pre_nullifier,  
- *                                   |                                    # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
- *                                   |                                    #   // taker_timer_start_pre_nullifier is to ensure, h(take_timer_pre_null, taker_null_secret) is not seen
- *                                   |                                    #   // basically it checks. Taker you better not start ur unlock timer while closing this trade. Or worse timer is already over and funds gone!
- *                                   |                                    # deferred_inclusion: pre_nullifier, deferred_root  
- *                                   |                                    # WARNING note that anyone shielding can put anything they want into pre_commitment_hash, thus also circuit_component_storage_hash
- *                                   |                                    # SO DO NOT TRACK THINGS LIKE AMOUNTS IN THERE
- *                                   |                                    # TODO maybe these are inputs not storage?
- *                       # derived from viewingKey (or somewhere else?)                                         
- *                       # re-used! nullifier(nullifier_secret, giga_index, leaf_index)    
- *                       # TODO if tree resets, so does index: but at that point a attack would need 
+ *        /               |       nonce   CONTRACT  \                                                      \                       |                                 # for permissionless / ico / payed mints/ we need a different way of thinking. 1. Shielded pay + commit to future time stamp. 2. read randao at that time stamp + mint + commitment has timestamp, then offchain + wrapperFactory derives attribute from that randao as seed.
+ * owner_key_hash    giga_index     |              circuit_component_storage_hash        wraptoad.sol -> keccak(wrapperFactoryAddr,_wrapperAssetHash)        
+ *     /        \                   to blind                              |                                                                    |
+ * pub_key_  nulifier_                commitment                          |                                       wrapperfactory.sol -> erc20=keccak(wrapperAddr,underlyingAddr), erc721=keccak(wrapperAddr,underlyingAddr, id)
+ *   x/y      secret                                                      # ex in join_split: pre_nullifier,  
+ *               |                                                        # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
+ *              # note:                                                   #   // taker_timer_start_pre_nullifier is to ensure, h(take_timer_pre_null, taker_null_secret) is not seen
+ *                normal people usually will share                        #   // basically it checks. Taker you better not start ur unlock timer while closing this trade. Or worse timer is already over and funds gone!
+ *                only thier owner_hash or owner_key_hash                 # deferred_inclusion: pre_nullifier, deferred_root  
+ *                if they want sender to pick which                       # WARNING note that anyone shielding can put anything they want into pre_commitment_hash, thus also circuit_component_storage_hash
+ *                chain they want to arrive at                            # SO DO NOT TRACK THINGS LIKE AMOUNTS IN THERE
+ *                BUT IN SWAP/ATOMIC_TOAD:                                
+ *                The nullifier_secret and pub_key will be shared
+ *                And not rotating nullifier_secret will leak EVERY FUCKING TX YOU MAKE
+ *                So pls rotate every tx you make!
+ *                Same with pubkey, but you only become reconizible as 
+ *                "that one dude with that specific pubkey who is too retarded to rotate"   
+ *                When ever you market make a swaptoad trade
 */
 pub fn hash_giga_leaf(local_root: Field, local_edge_index: Field) -> Field {
     Poseidon2::hash([local_root, local_edge_index, GIGA_LEAF_DOMAIN], 3)

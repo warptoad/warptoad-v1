@@ -13,7 +13,8 @@ use crate::hashing::{
 
 use crate::constants::{
     CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_COMP_STORAGE_SIZE,
-    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH, SWAP_TOAD_ORDER_SIZE, SWAP_TOAD_SELECTOR,
+    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH, NON_CIRCTUIT_COMP_AUTH_INPUTS,
+    SWAP_TOAD_ORDER_SIZE, SWAP_TOAD_SELECTOR,
 };
 use eddsa::eddsa_verify;
 use poseidon::{poseidon2::{self, Poseidon2}, poseidon::PoseidonHasher};
@@ -121,6 +122,10 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             //     hash_fake_commitment(spend_commitment.commitment.shared_nonce)
         }
         proven_commitments[index].shared_nonce = spend_commitment.commitment.shared_nonce;
+        proven_commitments[index].other_owners_nullifier_secret =
+            spend_commitment.commitment.other_owners_nullifier_secret;
+        proven_commitments[index].other_owners_pub_key =
+            spend_commitment.commitment.other_owners_pub_key;
     }
     proven_commitments
 }
@@ -157,6 +162,11 @@ struct CommitmentProofData {
     first_giga_index: Field,
     last_giga_index: Field,
     wrapper_id: Field,
+
+    // in a atomic/swatoad, you need to nullify the other parties commitment
+    // so here you pass it along incase you need it (TODO better place for this?)
+    other_owners_nullifier_secret: Field,
+    other_owners_pub_key: PubKey,
 }
 
 struct CommitmentRecipientData {
@@ -186,6 +196,8 @@ pub struct ProvenCommitment {
     giga_leaf_index: Field,
     local_leaf_index: Field,
     shared_nonce: Field,
+    other_owners_nullifier_secret: Field,
+    other_owners_pub_key: PubKey,
 }
 
 struct CommitmentSpendProof<let MAX_DEPTH: u32> {
@@ -270,12 +282,7 @@ pub struct PrivInputs<let DEPTH: u32, let SIZE: u32, let AUTH_HASH_SIZE: u32> {
     // secret owner data
     owner: OwnerInputs,
     auth: AuthInputs<AUTH_HASH_SIZE>,
-    // for now just one selector instead of contract_selector + function_selector
-    // this selector is to validate the spend logic, join_split will call any circuit_component with given inputs
-    // based on selectors and inputs in recipient_commitments
-    // you can only spend from one circuit_component at the time, this is to make joins easier to implement
-    // since it's very chill to work with all the same spend_commitments, so you can just add up amounts
-    circuit_comp_selector: Field,
+    spend_selectors: [Field; SIZE],
 }
 
 // TODO remember to pad timestamps a bit, by just waiting a extra random amount of time. So not to finger print txs proof time
@@ -321,6 +328,8 @@ fn main(
             "invalid auth signature",
         );
     }
+    // will accept anything when `priv_in.auth.pub_key.x == 0x00`, but is okay, then it's just a selector
+    let auth_selector: Field = priv_in.auth.inputs[0];
     //
     //  @WARNING: the contract_circuits below needs to at least verify 3 things:
     //      -every root in `spend_commitments_and_roots`, all contain valid roots
@@ -354,22 +363,23 @@ fn main(
         owner_hash,
     };
     // --------------- circuit components ----------------
-    assert(
-        (priv_in.circuit_comp_selector == SWAP_TOAD_SELECTOR)
-            | (priv_in.circuit_comp_selector == JOIN_SPLIT_SELECTOR),
-        "unkown spend selector",
-    );
-    // TODO PER TX NULLIFIER BRANCH:
-    // swaptoad should check that the selector in the spend commitment
-    // is JOIN_SPLIT. And only handle the settle branch
-    // join_split and swaptoad both share the same selector on their check of what is committed in their spend commitments
-    // This allows swaptoad to only worry about the settlement
-    // and then join_split can do the cancel of the trade.
-    // atomictoad will do the same trick
-    join_split(circuit_comp_inputs, priv_in.circuit_comp_selector);
-    swaptoad(circuit_comp_inputs, priv_in.circuit_comp_selector);
-    // --------------- ------------------ ----------------
+    // is okay, join_split takes over if auth_selector is set to anything unkown
+    // assert(
+    //     (auth_selector == SWAP_TOAD_SELECTOR) | (auth_selector == JOIN_SPLIT_SELECTOR),
+    //     "unkown auth_selector",
+    // );
 
+    //
+    for i in 0..CIRCUIT_SIZE {
+        assert(
+            (priv_in.spend_selectors[i] == SWAP_TOAD_SELECTOR)
+                | (priv_in.spend_selectors[i] == JOIN_SPLIT_SELECTOR),
+            "unkown spend_selector",
+        );
+    }
+    join_split(circuit_comp_inputs, priv_in.spend_selectors, auth_selector);
+    swaptoad(circuit_comp_inputs, priv_in.spend_selectors, auth_selector);
+    // --------------- ------------------ ----------------
     // @WARNING CONTAINS UNCONSTRAINT CODE
     // TODO remove all unconstraint code and instead just put hints like that in the priv_inputs
     check_accounting(
@@ -393,10 +403,9 @@ fn main(
         let nullfier: Field = pub_in.nullifiers[i];
 
         if (i < priv_in.actual_amount_spend_commitments) {
-            // if a unkown selector is used, then that spend is never check and cause infinite mint
+            // if a unkown selector is used, then that spend is never checked and cause infinite mint
             assert(
-                (spend_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR)
-                    | (spend_commit.circuit_comp_selector == SWAP_TOAD_SELECTOR),
+                (spend_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR),
                 "spend commitment has a unknown circuit_comp_selector",
             );
             // circuit components still customized this
@@ -481,10 +490,10 @@ pub struct SwapToadOrderOffsets {
     expiry: u32,
 }
 pub global SWAPTOAD_ORDER_OFFSETS: SwapToadOrderOffsets = SwapToadOrderOffsets {
-    maker_new_commit: 0,
-    maker_spend_commit: SWAP_TOAD_ORDER_SIZE * 1,
-    message_hashes: SWAP_TOAD_ORDER_SIZE * 2,
-    expiry: SWAP_TOAD_ORDER_SIZE * 3,
+    maker_new_commit: NON_CIRCTUIT_COMP_AUTH_INPUTS,
+    maker_spend_commit: NON_CIRCTUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 1,
+    message_hashes: NON_CIRCTUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 2,
+    expiry: NON_CIRCTUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 3,
 };
 pub struct PubKeyOffSets {
     x: u32,
@@ -493,11 +502,10 @@ pub struct PubKeyOffSets {
 
 pub struct SwapToadStorageOffsets {
     pub_key: PubKeyOffSets,
-    shared_nullifier_secret: u32,
 }
 
 pub global SWAPTOAD_STORAGE_OFFSETS: SwapToadStorageOffsets =
-    SwapToadStorageOffsets { pub_key: PubKeyOffSets { x: 0, y: 1 }, shared_nullifier_secret: 2 };
+    SwapToadStorageOffsets { pub_key: PubKeyOffSets { x: 0, y: 1 } };
 
 fn check_root<let STRING_SIZE: u32>(
     commitment: ProvenCommitment,
@@ -519,54 +527,36 @@ fn check_root<let STRING_SIZE: u32>(
     }
 }
 
-// TODO check not unshielding makers commitments
-fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>, spend_selector: Field) {
-    // @TODO during cleanup consider using pack/unpack trait
-    let mut commits_checked: Field = 0;
-    // order_message_hash does not need counter, same count as amount_new_in_order
-    for i in 0..SWAP_TOAD_ORDER_SIZE {
-        let maker_spend_commit: Field =
-            inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.maker_spend_commit + i];
-        let maker_new_commit: Field =
-            inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.maker_new_commit + i];
+fn swaptoad<let SIZE: u32>(
+    inputs: CircuitCompInputs<SIZE>,
+    spend_selectors: [Field; SIZE],
+    auth_selector: Field,
+) {
+    // swaptoad sleeps if SWAP_TOAD_SELECTOR was never in the auth_sig
+    if (auth_selector == SWAP_TOAD_SELECTOR) {
         assert(
-            (maker_spend_commit == 0x00) | (inputs.actual_amount_spend_commitments > i),
-            "maker needs to nullify more spend commitments then actual_amount_spend_commitments allows",
+            inputs.proof_expire_time_stamp.lt(inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.expiry]),
+            "`proof_expire_time_stamp` needs to be before a swaptoads order expiry",
         );
-        // @TODO at PER TX NULLIFIER BRANCH
-        // this would check storage comp_storage_slot == JOIN_SPLIT
-        // + check spend_commit.
-        // so spend_selector is per commit instead of per proof
-
-        if (spend_selector == SWAP_TOAD_SELECTOR) {
-            assert(inputs.auth_sig_pubkey.x != 0x00, "swaptoad needs a auth signature");
-            let order_message_hash: Field =
-                inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.message_hashes + i];
-            let in_new_commit_hash: Field = inputs.recipient_commitments_hashes[i];
-            // TODO make inputs do array of message hashes
-            let in_message_hash: Field = inputs.first_message_hash;
-
-            // TODO make the rename from recipient_commitment -> new_commit. And do spend_commit
-            if (maker_new_commit != 0x00) {
+        assert(inputs.auth_sig_pubkey.x != 0x00, "swaptoad needs an auth signature");
+        for i in 0..SWAP_TOAD_ORDER_SIZE {
+            // ----spend commit check --------
+            let maker_spend_commit: Field =
+                inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.maker_spend_commit + i];
+            if (spend_selectors[i] == SWAP_TOAD_SELECTOR) {
                 assert(
-                    (maker_new_commit == in_new_commit_hash),
-                    "expected maker_new_commit hash does not line up with new_commit_hashes in public inputs",
+                    (inputs.actual_amount_spend_commitments > i),
+                    "maker needs to nullify more spend commitments then actual_amount_spend_commitments allows",
                 );
-                assert(
-                    inputs.unshielding_commitments[i].asset_id == 0x00,
-                    "maker commitments cannot unshield",
-                );
-            }
-
-            assert(
-                (order_message_hash == 0x00) | (order_message_hash == in_message_hash),
-                "expected order_message_hash hash does not line up with message_hashes in public inputs",
-            );
-            if (maker_spend_commit != 0x00) {
                 let in_maker_spend_commit: ProvenCommitment = inputs.spend_commitments_and_roots[i];
                 assert(
-                    in_maker_spend_commit.circuit_comp_selector == SWAP_TOAD_SELECTOR,
-                    "only commitments with SWAP_TOAD_SELECTOR can be used to fill a trade",
+                    in_maker_spend_commit.giga_leaf_index == inputs.current_giga_index,
+                    "wrong chain, cannot fill this trade here",
+                );
+                //
+                assert(
+                    in_maker_spend_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
+                    "only commitments with JOIN_SPLIT_SELECTOR can be used to fill a trade",
                 );
                 check_root(
                     in_maker_spend_commit,
@@ -574,13 +564,20 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>, spend_selector: Fiel
                     inputs.giga_root,
                     "[TOADSWAP] in_maker_spend_commit",
                 );
-                let shared_nullifier_secret: Field = in_maker_spend_commit.circuit_comp_storage[
-                    SWAPTOAD_STORAGE_OFFSETS
-                        .shared_nullifier_secret];
                 let nullifier: Field = hash_nullifier(
-                    shared_nullifier_secret,
+                    in_maker_spend_commit.other_owners_nullifier_secret,
                     in_maker_spend_commit.giga_leaf_index,
                     in_maker_spend_commit.local_leaf_index,
+                );
+                let owner_keys_hash: Field = hash_owner_keys(
+                    in_maker_spend_commit.other_owners_pub_key,
+                    in_maker_spend_commit.other_owners_nullifier_secret,
+                );
+                let owner_hash: Field =
+                    hash_owner(owner_keys_hash, in_maker_spend_commit.giga_leaf_index);
+                assert(
+                    in_maker_spend_commit.owner_hash == owner_hash,
+                    "owner hash mismatch on swaptoad maker commitment",
                 );
                 assert(nullifier == inputs.nullifiers[i], "nullifier mismatch");
                 assert(
@@ -594,17 +591,54 @@ fn swaptoad<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>, spend_selector: Fiel
                         ],
                 };
                 assert(inputs.auth_sig_pubkey == pub_key_storage, "invalid auth pubkey");
+            } else {
+                assert(
+                    maker_spend_commit == 0x00,
+                    "maker_spend_commit from swaptoad order at ${i} expected the spend_selector to be set to SWAP_TOAD_SELECTOR",
+                );
             }
+            // --- new_commit check ---
+            let maker_new_commit: Field =
+                inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.maker_new_commit + i];
+            if (maker_new_commit != 0x00) {
+                let in_new_commit_hash: Field = inputs.recipient_commitments_hashes[i];
+                assert(
+                    (maker_new_commit == in_new_commit_hash),
+                    "expected maker_new_commit hash does not line up with new_commit_hashes in public inputs",
+                );
+                assert(
+                    inputs.unshielding_commitments[i].asset_id == 0x00,
+                    "maker commitments cannot unshield",
+                );
 
-            commits_checked += 1;
+                // ---- message check (from new commit) ----
+                // TODO do:
+                // let in_message_hash: Field = inputs.message_hashes[i];
+                let in_message_hash: Field = inputs.first_message_hash;
+                let order_message_hash: Field =
+                    inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.message_hashes + i];
+                assert(
+                    (order_message_hash == in_message_hash),
+                    "expected order_message_hash hash does not line up with message_hashes in public inputs",
+                );
+            }
+            //--------------------------
         }
-    }
-    if (commits_checked != 0) {
-        // TODO check
-        assert(
-            inputs.proof_expire_time_stamp.lt(inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.expiry]),
-            "`proof_expire_time_stamp` needs to be after a swaptoads order expiry",
-        );
+        // loop above does not go down to every spend commitment.
+        // so we ensure here that another circuit component takes care of those
+        for i in SWAP_TOAD_ORDER_SIZE..SIZE {
+            assert(
+                spend_selectors[i] != SWAP_TOAD_SELECTOR,
+                "spend selectors out side of the swaptoad order cannot be SWAP_TOAD_SELECTOR",
+            );
+        }
+    } else {
+        for i in 0..SIZE {
+            assert(
+                spend_selectors[i] != SWAP_TOAD_SELECTOR,
+                "spend selectors cannot be set to SWAP_TOAD_SELECTOR when auth selector is not SWAP_TOAD_SELECTOR",
+            );
+        }
     }
 }
 
@@ -714,31 +748,20 @@ fn check_accounting<let SIZE: u32>(
 }
 
 // TODO dummy nullifiers and commitment_hashes
-fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>, spend_selector: Field) {
-    // only one asset at the time pls
-    // `check_accounting` keeps running totals per asset_id now
-    // so join_split no longer needs to care if you send a mix of asset_ids
-    // let expected_asset_id: Field = inputs.spend_commitments_and_roots[0].asset_id;
-    // checked by `check_accounting` now
-    // let mut spendable: Field = 0;
-    // let mut spend: Field = 0;
-    for index in 0..SIZE {
+fn join_split<let SIZE: u32>(
+    inputs: CircuitCompInputs<SIZE>,
+    spend_selectors: [Field; SIZE],
+    // join_split does not care about auth
+    auth_selector: Field,
+) {
+    for i in 0..SIZE {
         // ----------- spend commitment --------------------------
-        let spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[index];
-        // SWAPTOAD in here so trades cancel with just join_split
-        // TODO per tx nullifier branch: make swaptoad commitments always join_split_selector since if nullifier
-        // is derived the same, no need for join split to have a way to figure out how derive a nullifier, it's all the same
-        // so also cleanup  that hash_nullifier like
+        // join_split wakes up only if spend_selector said so.
         if (
-            (
-                (spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR)
-                    | (spend_commitment.circuit_comp_selector == SWAP_TOAD_SELECTOR)
-            )
-                & (spend_selector == JOIN_SPLIT_SELECTOR)
+            (spend_selectors[i] == JOIN_SPLIT_SELECTOR)
+                & (i < inputs.actual_amount_spend_commitments)
         ) {
-            // commitment_range already does this for us (TODO isn't this a issue since that number came from unconstrained?)
-            //if (index < inputs.actual_amount_spend_commitments) {
-            // check root TODO hoist
+            let spend_commitment: ProvenCommitment = inputs.spend_commitments_and_roots[i];
             check_root(
                 spend_commitment,
                 inputs.local_root,
@@ -750,56 +773,14 @@ fn join_split<let SIZE: u32>(inputs: CircuitCompInputs<SIZE>, spend_selector: Fi
                 spend_commitment.owner_hash == inputs.owner_hash,
                 "Every spend commitment in join_split needs to have the owner_hash from the owner signature",
             );
-            // assert(
-            //     expected_asset_id == spend_commitment.asset_id,
-            //     "spend_commitments does not contain all same assetIds",
-            // );
 
             // nullifier (typicaly customized by circuit components)
-            let nullifier_secret: Field = if (
-                spend_commitment.circuit_comp_selector == SWAP_TOAD_SELECTOR
-            ) {
-                spend_commitment.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS
-                    .shared_nullifier_secret]
-            } else {
-                inputs.nullifier_secret
-            };
-
             let nullifier: Field = hash_nullifier(
-                nullifier_secret,
+                inputs.nullifier_secret,
                 spend_commitment.giga_leaf_index,
                 spend_commitment.local_leaf_index,
             );
-            assert(nullifier == inputs.nullifiers[index], "nullifier mismatch");
+            assert(nullifier == inputs.nullifiers[i], "nullifier mismatch");
         }
-
-        //spendable += spend_commitment.amount;
-        // ------------- recipients commitment ----------------------------------------
-        // hoisted to main
-        //let recipient_commitment: CommitmentRecipientData = inputs.recipient_commitments[index];
-        //let mut recipient_commitment_hash: Field = 0x00;
-        //if (index < inputs.actual_amount_recipient_commitments) {
-        // assert(
-        //     expected_asset_id == recipient_commitment.asset_id,
-        //     "recipient_commitments does not contain all same assetIds",
-        // );
-
-        // track amounts
-        // spend += recipient_commitment.amount;
-        // TODO this works right? Also spendable does need this right? If total supply is < FIELD_LIMIT?
-        // assert(lower_or_equal(recipient_commitment.amount, spend), "spend overflowed");
-
-        // recipient_commitment_hash = hash_commitment(
-        //     recipient_commitment.pre_commitment_hash,
-        //     recipient_commitment.asset_id,
-        //     recipient_commitment.amount,
-        // );
-        //}
-
-        // assert(
-        //     recipient_commitment_hash == inputs.recipient_commitments_hashes[index],
-        //     "a commitment_hash from public inputs does not match the recipient_commitment inputs hashed in circuit",
-        // );
     }
-    // assert(lower_or_equal(spend, spendable), "not enough funds");
 }
