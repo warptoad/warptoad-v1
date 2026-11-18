@@ -13,7 +13,7 @@ use crate::hashing::{
 
 use crate::constants::{
     CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_EMPTY_HASH, CIRCUIT_COMP_STORAGE_SIZE,
-    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH, NON_CIRCTUIT_COMP_AUTH_INPUTS,
+    CIRCUIT_SIZE, JOIN_SPLIT_SELECTOR, MAX_TREE_DEPTH, NON_CIRCUIT_COMP_AUTH_INPUTS,
     SWAP_TOAD_ORDER_SIZE, SWAP_TOAD_SELECTOR,
 };
 use eddsa::eddsa_verify;
@@ -122,10 +122,8 @@ fn proof_root_of_commitments<let MAX_DEPTH: u32, let SIZE: u32>(
             //     hash_fake_commitment(spend_commitment.commitment.shared_nonce)
         }
         proven_commitments[index].shared_nonce = spend_commitment.commitment.shared_nonce;
-        proven_commitments[index].other_owners_nullifier_secret =
-            spend_commitment.commitment.other_owners_nullifier_secret;
-        proven_commitments[index].other_owners_pub_key =
-            spend_commitment.commitment.other_owners_pub_key;
+        proven_commitments[index].unproven_owner_keys_hash =
+            spend_commitment.commitment.owner_keys_hash;
     }
     proven_commitments
 }
@@ -151,6 +149,7 @@ fn greater_or_equal(a: Field, b: Field) -> bool {
 
 struct CommitmentProofData {
     owner_hash: Field,
+    owner_keys_hash: Field,
     shared_nonce: Field,
     circuit_comp_selector: Field,
     // TODO we can optimize by removing this and not hashing this in proof_root_of_commitments
@@ -162,11 +161,6 @@ struct CommitmentProofData {
     first_giga_index: Field,
     last_giga_index: Field,
     wrapper_id: Field,
-
-    // in a atomic/swatoad, you need to nullify the other parties commitment
-    // so here you pass it along incase you need it (TODO better place for this?)
-    other_owners_nullifier_secret: Field,
-    other_owners_pub_key: PubKey,
 }
 
 struct CommitmentRecipientData {
@@ -196,8 +190,9 @@ pub struct ProvenCommitment {
     giga_leaf_index: Field,
     local_leaf_index: Field,
     shared_nonce: Field,
-    other_owners_nullifier_secret: Field,
-    other_owners_pub_key: PubKey,
+    // unproven since only swaptoad needs this.
+    // TODO better place for this?
+    unproven_owner_keys_hash: Field,
 }
 
 struct CommitmentSpendProof<let MAX_DEPTH: u32> {
@@ -245,7 +240,7 @@ pub struct PubInputs<let SIZE: u32> {
     roots: PubRootsAndIndexes,
     time_stamps: TimeStamps,
     public_hash: Field,
-    first_message_hash: Field,
+    message_hashes:[Field;SIZE] ,
     unshielding_commitments: [UnshieldingCommitment; SIZE],
     nullifiers: [Field; SIZE], // to make `spend_commitments` un spendable
     recipient_commitments_hashes: [Field; SIZE],
@@ -348,7 +343,7 @@ fn main(
         current_giga_index: pub_in.roots.current_giga_index,
         proof_expire_time_stamp: pub_in.time_stamps.proof_expire_time_stamp,
         historic_time_stamp: pub_in.time_stamps.historic_time_stamp,
-        first_message_hash: pub_in.first_message_hash,
+        message_hashes: pub_in.message_hashes,
         public_hash: pub_in.public_hash,
         unshielding_commitments: pub_in.unshielding_commitments,
         nullifiers: pub_in.nullifiers,
@@ -405,7 +400,8 @@ fn main(
         if (i < priv_in.actual_amount_spend_commitments) {
             // if a unkown selector is used, then that spend is never checked and cause infinite mint
             assert(
-                (spend_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR),
+                (spend_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR)
+                    | (spend_commit.circuit_comp_selector == SWAP_TOAD_SELECTOR),
                 "spend commitment has a unknown circuit_comp_selector",
             );
             // circuit components still customized this
@@ -469,7 +465,7 @@ pub struct CircuitCompInputs<let SIZE: u32> {
     proof_expire_time_stamp: Field,
     historic_time_stamp: Field,
     unshielding_commitments: [UnshieldingCommitment; SIZE],
-    first_message_hash: Field,
+    message_hashes: [Field; SIZE],
     public_hash: Field, // here you can constrain what is done in public
     nullifiers: [Field; SIZE],
     recipient_commitments_hashes: [Field; SIZE],
@@ -490,10 +486,10 @@ pub struct SwapToadOrderOffsets {
     expiry: u32,
 }
 pub global SWAPTOAD_ORDER_OFFSETS: SwapToadOrderOffsets = SwapToadOrderOffsets {
-    maker_new_commit: NON_CIRCTUIT_COMP_AUTH_INPUTS,
-    maker_spend_commit: NON_CIRCTUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 1,
-    message_hashes: NON_CIRCTUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 2,
-    expiry: NON_CIRCTUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 3,
+    maker_new_commit: NON_CIRCUIT_COMP_AUTH_INPUTS,
+    maker_spend_commit: NON_CIRCUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 1,
+    message_hashes: NON_CIRCUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 2,
+    expiry: NON_CIRCUIT_COMP_AUTH_INPUTS + SWAP_TOAD_ORDER_SIZE * 3,
 };
 pub struct PubKeyOffSets {
     x: u32,
@@ -502,10 +498,15 @@ pub struct PubKeyOffSets {
 
 pub struct SwapToadStorageOffsets {
     pub_key: PubKeyOffSets,
+    auth_expiry: u32,
+    shared_nullifier_secret: u32,
 }
 
-pub global SWAPTOAD_STORAGE_OFFSETS: SwapToadStorageOffsets =
-    SwapToadStorageOffsets { pub_key: PubKeyOffSets { x: 0, y: 1 } };
+pub global SWAPTOAD_STORAGE_OFFSETS: SwapToadStorageOffsets = SwapToadStorageOffsets {
+    pub_key: PubKeyOffSets { x: 0, y: 1 },
+    auth_expiry: 2,
+    shared_nullifier_secret: 3,
+};
 
 fn check_root<let STRING_SIZE: u32>(
     commitment: ProvenCommitment,
@@ -533,6 +534,9 @@ fn swaptoad<let SIZE: u32>(
     auth_selector: Field,
 ) {
     // swaptoad sleeps if SWAP_TOAD_SELECTOR was never in the auth_sig
+    // TODO decide if a SWAP_TOAD_SELECTOR is also used for atomic swap
+    // so user can be like: i can swap my commitment crosschain or samechain
+    // without having to decide before they put their shit in a commitment
     if (auth_selector == SWAP_TOAD_SELECTOR) {
         assert(
             inputs.proof_expire_time_stamp.lt(inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.expiry]),
@@ -555,7 +559,7 @@ fn swaptoad<let SIZE: u32>(
                 );
                 //
                 assert(
-                    in_maker_spend_commit.circuit_comp_selector == JOIN_SPLIT_SELECTOR,
+                    in_maker_spend_commit.circuit_comp_selector == SWAP_TOAD_SELECTOR,
                     "only commitments with JOIN_SPLIT_SELECTOR can be used to fill a trade",
                 );
                 check_root(
@@ -565,16 +569,16 @@ fn swaptoad<let SIZE: u32>(
                     "[TOADSWAP] in_maker_spend_commit",
                 );
                 let nullifier: Field = hash_nullifier(
-                    in_maker_spend_commit.other_owners_nullifier_secret,
+                    in_maker_spend_commit.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS
+                        .shared_nullifier_secret],
+                    in_maker_spend_commit.shared_nonce,
                     in_maker_spend_commit.giga_leaf_index,
                     in_maker_spend_commit.local_leaf_index,
                 );
-                let owner_keys_hash: Field = hash_owner_keys(
-                    in_maker_spend_commit.other_owners_pub_key,
-                    in_maker_spend_commit.other_owners_nullifier_secret,
+                let owner_hash: Field = hash_owner(
+                    in_maker_spend_commit.unproven_owner_keys_hash,
+                    in_maker_spend_commit.giga_leaf_index,
                 );
-                let owner_hash: Field =
-                    hash_owner(owner_keys_hash, in_maker_spend_commit.giga_leaf_index);
                 assert(
                     in_maker_spend_commit.owner_hash == owner_hash,
                     "owner hash mismatch on swaptoad maker commitment",
@@ -590,6 +594,17 @@ fn swaptoad<let SIZE: u32>(
                     y: in_maker_spend_commit.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS.pub_key.y
                         ],
                 };
+                // both spend and auth key usually are at the same security level. Like inside a hardware wallet
+                // but offchain order ux is simply more prone to user error, so giving wallet and users to tools
+                // to mitigate this issue by simply expiring the ability to sign offchain orders is added here.
+                // so bored apes users can somewhat more securely use swaptoad :D
+                let commit_auth_expiry: Field = in_maker_spend_commit.circuit_comp_storage[
+                    SWAPTOAD_STORAGE_OFFSETS
+                        .auth_expiry];
+                assert(
+                    lower_or_equal(inputs.proof_expire_time_stamp, commit_auth_expiry),
+                    "`proof_expire_time_stamp` needs to be before the maker orders spend commitments auth expiry inside the circuit component storage",
+                );
                 assert(inputs.auth_sig_pubkey == pub_key_storage, "invalid auth pubkey");
             } else {
                 assert(
@@ -614,7 +629,7 @@ fn swaptoad<let SIZE: u32>(
                 // ---- message check (from new commit) ----
                 // TODO do:
                 // let in_message_hash: Field = inputs.message_hashes[i];
-                let in_message_hash: Field = inputs.first_message_hash;
+                let in_message_hash: Field = inputs.message_hashes[i];
                 let order_message_hash: Field =
                     inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.message_hashes + i];
                 assert(
@@ -758,6 +773,7 @@ fn join_split<let SIZE: u32>(
         // ----------- spend commitment --------------------------
         // join_split wakes up only if spend_selector said so.
         if (
+            // swaptoad is in here. So you can cancel a trade just by spending it
             (spend_selectors[i] == JOIN_SPLIT_SELECTOR)
                 & (i < inputs.actual_amount_spend_commitments)
         ) {
@@ -773,10 +789,27 @@ fn join_split<let SIZE: u32>(
                 spend_commitment.owner_hash == inputs.owner_hash,
                 "Every spend commitment in join_split needs to have the owner_hash from the owner signature",
             );
+            // assert(
+            //     spend_commitment.circuit_comp_selector == spend_selectors[i],
+            //     "can't spend this commitment",
+            // );
 
             // nullifier (typicaly customized by circuit components)
+            // swaptoad re-uses join_split for cancels. But it derives it differently so we do:
+            let nullifier_secret: Field = if (
+                spend_commitment.circuit_comp_selector == SWAP_TOAD_SELECTOR
+            ) {
+                spend_commitment.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS
+                    .shared_nullifier_secret]
+            } else if (spend_commitment.circuit_comp_selector == JOIN_SPLIT_SELECTOR) {
+                inputs.nullifier_secret
+            } else {
+                assert(false, "spend_commitment ${i} contains unrecognized circuit_comp_selector");
+                0x00
+            };
             let nullifier: Field = hash_nullifier(
-                inputs.nullifier_secret,
+                nullifier_secret,
+                spend_commitment.shared_nonce,
                 spend_commitment.giga_leaf_index,
                 spend_commitment.local_leaf_index,
             );

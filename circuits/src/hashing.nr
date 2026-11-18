@@ -18,28 +18,44 @@ global GIGA_LEAF_DOMAIN: Field = 0x000000000000000000000000000000000000000000000
  *                                |               commitment        otherLeafs..         |                 \
  * to refer to recipient          |              /     |    \                             # needed to verify leaf_index since we need it for the nullifier
  * without knowing                |             /  asset_id  amount
- * their chain or pubKey       pre_commitment_hash         \                                
- *         \                  /   |      \       \          \                            
- *        ----owner_hash------  shared_  CIRCUIT_ \   wraptoad.sol -> poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )         # for permissioned shielded minting, we should do poseidon here so circuit can do it. + we need to tell wrapperFactoryAddr that it was minted in shielded (so you can block unwrapping), maybe timestamp the mint in asset_id so wrapper factory can refuse unshields of mints passed a time window. Also kind of need a account based note to track total amount minted, 
+ * their chain or pubKey       pre_commitment_hash          \                                
+ *         \                  /   |      \        \          \                            
+ *        ----owner_hash-------  shared_  CIRCUIT_ \   wraptoad.sol -> poseidon2(firstGigaIndex,lastGigaIndex, wrapperId )         # for permissioned shielded minting, we should do poseidon here so circuit can do it. + we need to tell wrapperFactoryAddr that it was minted in shielded (so you can block unwrapping), maybe timestamp the mint in asset_id so wrapper factory can refuse unshields of mints passed a time window. Also kind of need a account based note to track total amount minted, 
  *        /               |       nonce   CONTRACT  \                                                      \                       |                                 # for permissionless / ico / payed mints/ we need a different way of thinking. 1. Shielded pay + commit to future time stamp. 2. read randao at that time stamp + mint + commitment has timestamp, then offchain + wrapperFactory derives attribute from that randao as seed.
- * owner_key_hash    giga_index     |              circuit_component_storage_hash        wraptoad.sol -> keccak(wrapperFactoryAddr,_wrapperAssetHash)        
- *     /        \                   to blind                              |                                                                    |
- * pub_key_  nulifier_                commitment                          |                                       wrapperfactory.sol -> erc20=keccak(wrapperAddr,underlyingAddr), erc721=keccak(wrapperAddr,underlyingAddr, id)
- *   x/y      secret                                                      # ex in join_split: pre_nullifier,  
- *               |                                                        # swap_lock: end_swap_pre_nullifier, timer_start_pre_nullifier, taker_timer_start_pre_nullifier.
- *              # note:                                                   #   // taker_timer_start_pre_nullifier is to ensure, h(take_timer_pre_null, taker_null_secret) is not seen
- *                normal people usually will share                        #   // basically it checks. Taker you better not start ur unlock timer while closing this trade. Or worse timer is already over and funds gone!
- *                only thier owner_hash or owner_key_hash                 # deferred_inclusion: pre_nullifier, deferred_root  
- *                if they want sender to pick which                       # WARNING note that anyone shielding can put anything they want into pre_commitment_hash, thus also circuit_component_storage_hash
- *                chain they want to arrive at                            # SO DO NOT TRACK THINGS LIKE AMOUNTS IN THERE
- *                BUT IN SWAP/ATOMIC_TOAD:                                
- *                The nullifier_secret and pub_key will be shared
- *                And not rotating nullifier_secret will leak EVERY FUCKING TX YOU MAKE
- *                So pls rotate every tx you make!
- *                Same with pubkey, but you only become reconizible as 
- *                "that one dude with that specific pubkey who is too retarded to rotate"   
- *                When ever you market make a swaptoad trade
-*/
+ * owner_key_hash    giga_index      |              circuit_component_storage_hash        wraptoad.sol -> keccak(wrapperFactoryAddr,_wrapperAssetHash)        
+ *     /        \                  to blind         ||        |         |                                                                    |
+ * pub_key_     nullifier_secret   commitment     auth_   auth_     shared_                                                          wrapperfactory.sol -> erc20=keccak(wrapperAddr,underlyingAddr), erc721=keccak(wrapperAddr,underlyingAddr, id)
+ *   x/y                                           pubkey  expiry    nullifier_       
+ *                                                                     secret   \     
+ *                                                                               \    
+ *                            # note: normal people usually will share            # This example of swaptoad. But can also be: nulltoad, atomictoad, multitoad   
+ *                            only thier owner_hash or owner_key_hash             # deferred_inclusion: pre_nullifier, deferred_root.  
+ *                            If they want the sender to pick which chain         # WARNING note that anyone shielding can put anything they want into pre_commitment_hash, thus also circuit_component_storage_hash
+ *                            They can rotate nullifier_secret to stay            # SO DO NOT TRACK THINGS LIKE AMOUNTS IN THERE
+ *                            More anon, but that is not a big issue, since
+ *                            onchain. No-one knows they recieved money, only sender knows
+ *                            BUT IN SWAP/ATOMIC_TOAD:                                
+ *                            Not rotating nullifier_secret will make you recognizable 
+ *                            On every trade you will be: "that one retard with that specific- 
+ *                            owner_key_hash who didn't rotate nullifier_secret". 
+ *                            They dont see `nullifier_secret`, but that is the thing that can make
+ *                            owner_key_hash unique after every completed trade
+ *                            In general `nullifier_secret` rotate as much as possible.
+ *                            For payments and the warptoad address users share around it's fine being the same 
+ *                            every time. Might be confusing to constantly change it. People sending fund over might
+ *                            get wierded out and constantly want to confirm "is this you?".
+ *                            But definitly should be mananaged in sdk to make fresh nullifier_secrets for that address
+ *                            And a fresh viewingkey (for encrypted messages) as well. So wallet catered to super users can offer that
+ *                            But for trading it's not a super user thing, doxxing on every new trade "i am the same person" is just bad
+ *                            The taker in the trade does not need viewkey pubkey, since maker encrypts the blobs for them. 
+ *                            So we only need to rotate nullifier_secret. 
+ *                            I guess we can just do nullifier_secret = h(nullifier_secret_root, counter)
+ *                            And on every encrypted blob synced from a trade. run the counter with numbers not seen before.
+ *                            Then for payment rotation do the same but mayber silo out so the counter dont conflict
+ *                            nullifier_secret = h(nullifier_secret_root, counter, "<ACCOUNT_TYPE>")
+ *                            TODO clean up this brain dump and put into WALLET_SDK_MINDFULLNESS.md
+ *
+*/  
 pub fn hash_giga_leaf(local_root: Field, local_edge_index: Field) -> Field {
     Poseidon2::hash([local_root, local_edge_index, GIGA_LEAF_DOMAIN], 3)
 }
@@ -121,10 +137,14 @@ pub fn hash_public(messages_hash: Field, other_hash: Field) -> Field {
 
 pub fn hash_nullifier(
     nullifier_secret: Field,
+    shared_nonce: Field,
     giga_leaf_index: Field,
     local_leaf_index: Field,
 ) -> Field {
-    Poseidon2::hash([nullifier_secret, giga_leaf_index, local_leaf_index], 3)
+    // using indexes as a protocol gauranteed nonce, 
+    // like any combo of giga_index x local_index will never happen twice. The local tree is insert only
+    // shared_nonce is added to limit the fall out of a leak + re-use of nullifier_secret
+    Poseidon2::hash([nullifier_secret,shared_nonce, giga_leaf_index, local_leaf_index], 4)
 }
 
 // this safe since nullifier have 3 inputs but we have 2 here.

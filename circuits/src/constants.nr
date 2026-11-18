@@ -30,10 +30,10 @@ pub global SWAP_TOAD_MISC_AUTH_INPUTS: u32 = 1;
 // 3*order_size because maker want to sign either 3 commitment_hash to constrain payment (so ex recieve 3 different asset_ids)
 // Or sell 3 different asset_ids
 // then it also needs to contrain the public messages hashes in the case of recieving 3 payment commitments
-pub global NON_CIRCTUIT_COMP_AUTH_INPUTS: u32 = 1;
+pub global NON_CIRCUIT_COMP_AUTH_INPUTS: u32 = 1;
 pub global CIRCUIT_COMP_AUTH_SIZE: u32 =
-    NON_CIRCTUIT_COMP_AUTH_INPUTS + 3 * SWAP_TOAD_ORDER_SIZE + SWAP_TOAD_MISC_AUTH_INPUTS;
-pub global CIRCUIT_COMP_STORAGE_SIZE: u32 = 3;
+    NON_CIRCUIT_COMP_AUTH_INPUTS + 3 * SWAP_TOAD_ORDER_SIZE + SWAP_TOAD_MISC_AUTH_INPUTS;
+pub global CIRCUIT_COMP_STORAGE_SIZE: u32 = 7;
 pub global CIRCUIT_COMP_STORAGE_EMPTY: [Field; CIRCUIT_COMP_STORAGE_SIZE] = std::mem::zeroed();
 pub global CIRCUIT_COMP_STORAGE_EMPTY_HASH: Field =
     Poseidon2::hash(CIRCUIT_COMP_STORAGE_EMPTY, CIRCUIT_COMP_STORAGE_SIZE);
