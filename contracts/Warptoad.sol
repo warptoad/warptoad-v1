@@ -80,7 +80,6 @@ struct ShieldedTx {
     // one encrypted note per recipient slot, fakes and unshields included so every slot looks the same. See src/messages.ts
     // the hash of each one is a public input of the proof (`message_hashes`), so a relayer can't swap them
     bytes[] messages;
-    uint256 publicHash;
     bytes proof; // of circuits/src/main.nr
 }
 
@@ -332,7 +331,6 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             _tx.roots,
             _tx.timeStamps,
             _tx.messages,
-            _tx.publicHash,
             _tx.unshieldingCommitments,
             _tx.nullifiers,
             _tx.recipientCommitmentsHashes,
@@ -480,17 +478,17 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     /**
      * @notice lays out the public inputs in the order the circuit expects them, see `PubInputs` in circuits/src/main.nr
      * public so the sdk can debug against it
+     * @dev `public_hash` is computed in here: keccak31Byte(abi.encode(message hashes, unshielding commitments,
+     * nullifiers, recipient commitment hashes)), everything public the spender has to authorize. The circuit checks
+     * the spender's signature over it, so nobody else can change any of it, not even whoever builds the proof.
+     * Mirrored by `hashPublic` in src/hashing.ts
      * @param _messages: each one is hashed into the circuit's `message_hashes`, keccak31Byte(message). Mirrored by
      * `hashMessages` in src/messages.ts
-     * @param _publicHash: what the circuit gets as `public_hash`, passed through as given. Whatever else a shielded tx
-     * does in public goes in here so it is covered by the spender's signature. Nothing yet, so the sdk sends 0, see
-     * `publicHashOf` in src/messages.ts
      */
     function formatPublicInputs(
         PubRootsAndIndexes calldata _roots,
         TimeStamps calldata _timeStamps,
         bytes[] calldata _messages,
-        uint256 _publicHash,
         UnshieldingCommitment[] calldata _unshieldingCommitments,
         uint256[] calldata _nullifiers,
         uint256[] calldata _recipientCommitmentsHashes,
@@ -517,14 +515,24 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         publicInputs[4] = bytes32(uint256(_gigaIndex)); // current_giga_index
         publicInputs[5] = bytes32(_timeStamps.proofExpireTimeStamp);
         publicInputs[6] = bytes32(_timeStamps.historicTimeStamp);
-        publicInputs[7] = bytes32(_publicHash);
 
         // a loop of its own: together with the offsets below the stack gets too deep
+        uint256[] memory messageHashes = new uint256[](size);
         for (uint256 i = 0; i < size; i++) {
-            publicInputs[PUBLIC_INPUTS_HEAD + i] = bytes32(
-                keccak31Byte(_messages[i])
-            );
+            messageHashes[i] = keccak31Byte(_messages[i]);
+            publicInputs[PUBLIC_INPUTS_HEAD + i] = bytes32(messageHashes[i]);
         }
+        // public_hash
+        publicInputs[7] = bytes32(
+            keccak31Byte(
+                abi.encode(
+                    messageHashes,
+                    _unshieldingCommitments,
+                    _nullifiers,
+                    _recipientCommitmentsHashes
+                )
+            )
+        );
 
         uint256 unshieldingOffset = PUBLIC_INPUTS_HEAD + size;
         uint256 nullifiersOffset = unshieldingOffset + size * 3;

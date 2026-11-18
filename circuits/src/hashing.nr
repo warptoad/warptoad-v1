@@ -1,8 +1,8 @@
 use crate::constants::{
-    CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_SIZE, CIRCUIT_SIZE, FAKE_COMMITMENT_DOMAIN,
+    CIRCUIT_COMP_AUTH_SIZE, CIRCUIT_COMP_STORAGE_SIZE, FAKE_COMMITMENT_DOMAIN,
     FAKE_NULLIFIER_DOMAIN,
 };
-use crate::{ProvenCommitment, PubKey};
+use crate::PubKey;
 use poseidon::poseidon2::{Poseidon2};
 
 global GIGA_LEAF_DOMAIN: Field = 0x0000000000000000000000000000000000000000000000474947415f4c454146;
@@ -110,31 +110,6 @@ pub fn hash_owner_keys(pub_key: PubKey, nullifier_secret: Field) -> Field {
     )
 }
 
-pub fn hash_spend_signature_inputs(
-    public_hash: Field,
-    spend_commitments: [ProvenCommitment; CIRCUIT_SIZE],
-    recipient_commitments_hashes: [Field; CIRCUIT_SIZE],
-) -> Field {
-    let mut inputs: [Field; CIRCUIT_SIZE * 2 + 1] = std::mem::zeroed();
-    for i in 0..CIRCUIT_SIZE {
-        inputs[i] = spend_commitments[i].commitment_hash;
-        inputs[CIRCUIT_SIZE + i] = recipient_commitments_hashes[i];
-    }
-    inputs[CIRCUIT_SIZE * 2] = public_hash;
-    Poseidon2::hash(inputs, CIRCUIT_SIZE * 2 + 1)
-}
-
-// messages_hash: keccak(encrypted messages) >> 8, mirrored in Warptoad.hashPublic
-// other_hash: keccak of whatever else is done in public, 0 for now. Neither is checked here,
-// circuit components can constrain messages_hash later (through auth inputs for example)
-// @warning constraining it means recomputing keccak over every message *inside* the circuit, and the
-// messages are ~3.5KB per tx. Not impossible in noir but expensive. If that day comes, consider hashing the
-// messages with poseidon2 in the contract instead (it's 8 gas per byte of calldata either way) or only
-// constrain the note tags, which are 32 bytes each
-pub fn hash_public(messages_hash: Field, other_hash: Field) -> Field {
-    Poseidon2::hash([messages_hash, other_hash], 2)
-}
-
 pub fn hash_nullifier(
     nullifier_secret: Field,
     shared_nonce: Field,
@@ -163,8 +138,4 @@ pub fn hash_fake_commitment(nonce: Field) -> Field {
 
 pub fn hash_asset_id(first_giga_index: Field, last_giga_index: Field, wrapper_id: Field) -> Field {
     Poseidon2::hash([first_giga_index, last_giga_index, wrapper_id], 3)
-}
-
-pub fn hash_shared_nonce_swaptoad(shared_nullifier_secret: Field, commitment_type:Field) -> Field {
-    Poseidon2::hash([shared_nullifier_secret, commitment_type], 2)
 }

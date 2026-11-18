@@ -7,8 +7,7 @@ use crate::merkle::{leaf_and_index_to_root, LeafAndIndexInclusionProof, LeafIncl
 use crate::hashing::{
     hash_asset_id, hash_circuit_component_auth_sig, hash_circuit_component_storage, hash_commitment,
     hash_fake_commitment, hash_fake_nullifier, hash_giga_leaf, hash_nullifier, hash_owner,
-    hash_owner_keys, hash_pre_commitment, hash_public, hash_shared_nonce_swaptoad,
-    hash_spend_signature_inputs,
+    hash_owner_keys, hash_pre_commitment,
 };
 
 use crate::constants::{
@@ -302,16 +301,15 @@ fn main(
             priv_in.actual_amount_spend_commitments,
         );
 
-    let spend_sig_hash: Field = hash_spend_signature_inputs(
-        pub_in.public_hash,
-        spend_commitments_and_roots,
-        pub_in.recipient_commitments_hashes,
-    );
+    // the contract hashes everything public the spender has to authorize into public_hash:
+    // message hashes, unshielding commitments, nullifiers and recipient commitment hashes. See `Warptoad.formatPublicInputs`
+    // the nullifiers stand in for the spend commitments, each real one is tied to its commitment by a circuit component
+    // so signing that one field is enough. And a prover that is not the signer can't change any of it
     assert(
         verify_signature(
             priv_in.owner.pub_key,
             priv_in.owner.signature,
-            spend_sig_hash,
+            pub_in.public_hash,
         ),
         "invalid spend signature",
     );
