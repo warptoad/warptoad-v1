@@ -10,7 +10,7 @@ import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 import { getAddress, parseEventLogs, type Address, type Hex } from "viem";
 import { chainName, chainConfigArgs, NAME_PREFIX, SYMBOL_PREFIX } from "../src/config.js";
 import { CIRCUIT_SIZE } from "../src/constants.js";
-import { hashAssetId, hashCommitment } from "../src/hashing.js";
+import { hashAssetId, hashCommitment, keccak31Byte } from "../src/hashing.js";
 import {
     assetOf,
     computeWrapperAddress,
@@ -460,11 +460,12 @@ describe("Warptoad contracts", async function () {
             nullifiers[2] = 0x22n;
             const recipients = zeros();
             recipients[3] = 0x33n;
+            const messages: Hex[] = ["0x", "0xaa", "0xbbbb", "0xcccccc"];
 
             const inputs = await d.warptoad.read.formatPublicInputs([
                 { localRoot: 1n, localEdgeIndex: 2n, gigaRoot: 3n, gigaEdgeIndex: 4n },
                 { proofExpireTimeStamp: 7n, historicTimeStamp: 8n },
-                9n,
+                messages,
                 10n,
                 unshielding,
                 nullifiers,
@@ -473,16 +474,18 @@ describe("Warptoad contracts", async function () {
             ]);
             const asBigInt = inputs.map((x) => BigInt(x));
 
-            // 9 head fields, then 3 per unshielding slot, then nullifiers, then recipient commitments.
+            // 8 head fields, then one hash per message, 3 fields per unshielding slot, nullifiers, recipient commitments.
             // the giga index range moved into the assetId, only current_giga_index is left and the contract fills it in.
-            // `PubInputs` in circuits/src/main.nr puts public_hash (passed through) before first_message_hash (the
-            // contract hashes it from the first two messages), so the proof only verifies with them in that order
-            const head = 9;
-            assert.equal(asBigInt.length, head + CIRCUIT_SIZE * 5);
-            assert.deepEqual(asBigInt.slice(0, head), [1n, 2n, 3n, 4n, d.gigaIndex, 7n, 8n, 10n, 9n]);
-            assert.deepEqual(asBigInt.slice(head + 3, head + 6), [0x11n, 0x12n, 0x13n]);
-            assert.equal(asBigInt[head + CIRCUIT_SIZE * 3 + 2], 0x22n);
-            assert.equal(asBigInt[head + CIRCUIT_SIZE * 4 + 3], 0x33n);
+            // `PubInputs` in circuits/src/main.nr puts public_hash (passed through) before message_hashes (the
+            // contract hashes each message), so the proof only verifies with them in that order
+            const head = 8;
+            assert.equal(asBigInt.length, head + CIRCUIT_SIZE * 6);
+            assert.deepEqual(asBigInt.slice(0, head), [1n, 2n, 3n, 4n, d.gigaIndex, 7n, 8n, 10n]);
+            assert.deepEqual(asBigInt.slice(head, head + CIRCUIT_SIZE), messages.map((m) => keccak31Byte(m)));
+            const unshieldingOffset = head + CIRCUIT_SIZE;
+            assert.deepEqual(asBigInt.slice(unshieldingOffset + 3, unshieldingOffset + 6), [0x11n, 0x12n, 0x13n]);
+            assert.equal(asBigInt[unshieldingOffset + CIRCUIT_SIZE * 3 + 2], 0x22n);
+            assert.equal(asBigInt[unshieldingOffset + CIRCUIT_SIZE * 4 + 3], 0x33n);
         });
 
         it("rejects arrays that are not CIRCUIT_SIZE long", async () => {

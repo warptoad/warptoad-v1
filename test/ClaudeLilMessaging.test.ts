@@ -3,7 +3,7 @@
  *
  *   1. alice wraps 1000 and shields 400 to herself, with a note encrypted to her own view key
  *   2. alice sends bob 300 and 100 change, one encrypted note per slot, fakes get garbage.
- *      A relayer that swaps one of the first two messages gets a verifier revert, those are in first_message_hash
+ *      A relayer that swaps any of the messages gets a verifier revert, their hashes are public inputs
  *   3. bob and alice scan every Message event and find exactly their own notes. Bob turns the assetId in his
  *      note back into the asset preimage and the wrapper with eth_calls only, see src/assets.ts
  *   4. bob unshields the note he found into wrapped USDC and unwraps it into the real thing
@@ -27,7 +27,7 @@ import { cpus } from "node:os";
 import { network } from "hardhat";
 import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 import type { Asset, Note, WarptoadContract, WrapperERC20Contract, WrapperFactoryContract } from "../src/types.js";
-import { CIRCUIT_COMP_STORAGE_EMPTY_HASH, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
+import { CIRCUIT_COMP_STORAGE_EMPTY, CIRCUIT_COMP_STORAGE_EMPTY_HASH, JOIN_SPLIT_SELECTOR } from "../src/constants.js";
 import {
     hashAssetId,
     hashFakeCommitment,
@@ -45,6 +45,7 @@ import {
     merkleProofInput,
     noAuth,
     hashNote,
+    joinSplitSelectors,
     noUnshield,
     prove,
     pubRoots,
@@ -205,7 +206,7 @@ describe("ClaudeLilMessaging", async function () {
         ]);
     });
 
-    it("2. alice sends bob 300 and 100 change, messages included, relayer can't touch the first two", async () => {
+    it("2. alice sends bob 300 and 100 change, messages included, relayer can't touch them", async () => {
         const localTree = await tree();
         const { proof: localProof, edgeIndex } = merkleProofInput(localTree, hashNote(aliceDeposit));
 
@@ -219,7 +220,7 @@ describe("ClaudeLilMessaging", async function () {
             hashFakeCommitment({ nonce: nonce(2004) }),
         ] as CircuitSizeFields;
         const nullifiers = [
-            hashNullifier({ nullifierSecret: alice.nullifierSecret, gigaLeafIndex: gigaIndex, localLeafIndex: localProof.index }),
+            hashNullifier({ nullifierSecret: alice.nullifierSecret, sharedNonce: aliceDeposit.sharedNonce, gigaLeafIndex: gigaIndex, localLeafIndex: localProof.index }),
             hashFakeNullifier({ nonce: nonce(2005) }),
             hashFakeNullifier({ nonce: nonce(2006) }),
             hashFakeNullifier({ nonce: nonce(2007) }),
@@ -232,7 +233,7 @@ describe("ClaudeLilMessaging", async function () {
             await fakeMessage(nonce(2003)),
             await fakeMessage(nonce(2004)),
         ];
-        const { publicHash, firstMessageHash } = publicHashOf(messages);
+        const { publicHash, messageHashes } = publicHashOf(messages);
 
         const sigHash = hashSpendSignatureInputs({
             publicHash,
@@ -248,7 +249,7 @@ describe("ClaudeLilMessaging", async function () {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
                 public_hash: publicHash,
-                first_message_hash: firstMessageHash,
+                message_hashes: messageHashes,
                 unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
@@ -271,7 +272,7 @@ describe("ClaudeLilMessaging", async function () {
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: noAuth(),
-                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
+                spend_selectors: joinSplitSelectors(),
             },
         });
 
@@ -286,10 +287,8 @@ describe("ClaudeLilMessaging", async function () {
             publicHash,
             proof,
         };
-        assert.equal(await warptoad.read.hashMessages([messages[0], messages[1]]), firstMessageHash);
-
-        // a relayer swapping bob's message for garbage changes first_message_hash, a public input the proof was made for.
-        // Only the first two messages are hashed by the contract, the other two are not bound to the proof.
+        // a relayer swapping bob's message for garbage changes its entry in message_hashes, a public input the proof was
+        // made for. The contract hashes every message, see ClaudesLilMessageBinding.test.ts for the other slots.
         // The generated verifier reverts with its own errors instead of returning false, so no VerificationFailed to match on
         const tampered = { ...tx, messages: [await fakeMessage(666n), ...messages.slice(1)] };
         await assert.rejects(warptoad.write.transactPrivate([tampered]));
@@ -338,7 +337,7 @@ describe("ClaudeLilMessaging", async function () {
             hashFakeCommitment({ nonce: nonce(3003) }),
         ] as CircuitSizeFields;
         const nullifiers = [
-            hashNullifier({ nullifierSecret: bob.nullifierSecret, gigaLeafIndex: gigaIndex, localLeafIndex: localProof.index }),
+            hashNullifier({ nullifierSecret: bob.nullifierSecret, sharedNonce: bobNote.sharedNonce, gigaLeafIndex: gigaIndex, localLeafIndex: localProof.index }),
             hashFakeNullifier({ nonce: nonce(3004) }),
             hashFakeNullifier({ nonce: nonce(3005) }),
             hashFakeNullifier({ nonce: nonce(3006) }),
@@ -351,7 +350,7 @@ describe("ClaudeLilMessaging", async function () {
             await fakeMessage(nonce(3002)),
             await fakeMessage(nonce(3003)),
         ];
-        const { publicHash, firstMessageHash } = publicHashOf(messages);
+        const { publicHash, messageHashes } = publicHashOf(messages);
 
         const sigHash = hashSpendSignatureInputs({
             publicHash,
@@ -367,7 +366,7 @@ describe("ClaudeLilMessaging", async function () {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
                 public_hash: publicHash,
-                first_message_hash: firstMessageHash,
+                message_hashes: messageHashes,
                 unshielding_commitments: [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()],
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
@@ -390,7 +389,7 @@ describe("ClaudeLilMessaging", async function () {
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: noAuth(),
-                circuit_comp_selector: JOIN_SPLIT_SELECTOR,
+                spend_selectors: joinSplitSelectors(),
             },
         });
 
@@ -430,6 +429,6 @@ describe("ClaudeLilMessaging", async function () {
 
     /** decryptNote always fills in the optional Note fields */
     function recipientDefaults() {
-        return { circuitCompSelector: JOIN_SPLIT_SELECTOR, circuitCompStorage: [0n, 0n, 0n] };
+        return { circuitCompSelector: JOIN_SPLIT_SELECTOR, circuitCompStorage: [...CIRCUIT_COMP_STORAGE_EMPTY] };
     }
 });

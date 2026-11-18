@@ -78,10 +78,10 @@ struct ShieldedTx {
     uint256[] nullifiers; // fakes included, all get stored
     uint256[] recipientCommitmentsHashes; // fakes included, inserted in the tree except unshielding slots
     // one encrypted note per recipient slot, fakes and unshields included so every slot looks the same. See src/messages.ts
-    // bound to the proof through `public_hash`, so a relayer can't swap them
+    // the hash of each one is a public input of the proof (`message_hashes`), so a relayer can't swap them
     bytes[] messages;
     uint256 publicHash;
-    bytes proof; // of circuits/src/main.nr, `public_hash` is `hashPublic(messages)`
+    bytes proof; // of circuits/src/main.nr
 }
 
 /**
@@ -100,8 +100,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     IWarptoadVerifier public immutable verifier;
     /// @notice mirrors `CIRCUIT_SIZE` in circuits/src/constants.nr: amount of spend and recipient commitment slots per proof
     uint256 public immutable CIRCUIT_SIZE;
-    /// @dev roots, indexes, timestamps,messagesHash and public hash. Everything that isn't an array of CIRCUIT_SIZE
-    uint256 private constant PUBLIC_INPUTS_HEAD = 9;
+    /// @dev roots, indexes, timestamps and public hash. Everything that isn't an array of CIRCUIT_SIZE
+    uint256 private constant PUBLIC_INPUTS_HEAD = 8;
 
     /// @notice every root the commitment tree ever had, and its size at that time. 0 means unknown root
     mapping(uint256 localRoot => uint256 treeSize) public localRoots;
@@ -327,13 +327,11 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     function transactPrivate(ShieldedTx calldata _tx) external nonReentrant {
         _spendNullifiers(_tx.nullifiers);
         _checkRootsAndTimeStamps(_tx.roots, _tx.timeStamps);
-        if (_tx.messages.length != CIRCUIT_SIZE)
-            revert WrongCircuitSize(CIRCUIT_SIZE, _tx.messages.length);
+        // also checks every array is CIRCUIT_SIZE long, messages included
         bytes32[] memory publicInputs = formatPublicInputs(
             _tx.roots,
             _tx.timeStamps,
-            // swaptoad only needs the first 2 message
-            hashMessages(_tx.messages[0], _tx.messages[1]),
+            _tx.messages,
             _tx.publicHash,
             _tx.unshieldingCommitments,
             _tx.nullifiers,
@@ -351,18 +349,6 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         for (uint256 i = 0; i < CIRCUIT_SIZE; i++) {
             emit Message(_tx.recipientCommitmentsHashes[i], _tx.messages[i]);
         }
-    }
-
-    /**
-     * @notice `public_hash` of the circuit, see `hash_public` in circuits/src/hashing.nr and `publicHashOf` in
-     * src/messages.ts. Everything a shielded tx does in public goes in here so it is covered by the spender's
-     * signature: Poseidon2(keccak(messages), keccak(other public things)). The second one is 0 until there are other things
-     */
-    function hashMessages(
-        bytes calldata _message1,
-        bytes calldata _message2
-    ) public pure returns (uint256) {
-        return keccak31Byte(abi.encode(_message1, _message2));
     }
 
     function _checkRootsAndTimeStamps(
@@ -494,12 +480,16 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
     /**
      * @notice lays out the public inputs in the order the circuit expects them, see `PubInputs` in circuits/src/main.nr
      * public so the sdk can debug against it
-     * @param _publicHash: what the circuit gets as `public_hash`, see hashPublic
+     * @param _messages: each one is hashed into the circuit's `message_hashes`, keccak31Byte(message). Mirrored by
+     * `hashMessages` in src/messages.ts
+     * @param _publicHash: what the circuit gets as `public_hash`, passed through as given. Whatever else a shielded tx
+     * does in public goes in here so it is covered by the spender's signature. Nothing yet, so the sdk sends 0, see
+     * `publicHashOf` in src/messages.ts
      */
     function formatPublicInputs(
         PubRootsAndIndexes calldata _roots,
         TimeStamps calldata _timeStamps,
-        uint256 _messagesHash,
+        bytes[] calldata _messages,
         uint256 _publicHash,
         UnshieldingCommitment[] calldata _unshieldingCommitments,
         uint256[] calldata _nullifiers,
@@ -507,6 +497,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         uint256 _gigaIndex
     ) public view returns (bytes32[] memory publicInputs) {
         uint256 size = CIRCUIT_SIZE;
+        if (_messages.length != size)
+            revert WrongCircuitSize(size, _messages.length);
         if (_unshieldingCommitments.length != size)
             revert WrongCircuitSize(size, _unshieldingCommitments.length);
         if (_nullifiers.length != size)
@@ -515,8 +507,8 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
             revert WrongCircuitSize(size, _recipientCommitmentsHashes.length);
         }
 
-        // head + unshielding (3 fields each) + nullifiers + recipient commitments
-        publicInputs = new bytes32[](PUBLIC_INPUTS_HEAD + size * 5);
+        // head + message hashes + unshielding (3 fields each) + nullifiers + recipient commitments
+        publicInputs = new bytes32[](PUBLIC_INPUTS_HEAD + size * 6);
 
         publicInputs[0] = bytes32(_roots.localRoot);
         publicInputs[1] = bytes32(_roots.localEdgeIndex);
@@ -526,9 +518,15 @@ contract Warptoad is ERC1155Holder, ReentrancyGuard, SkinnyIMTReadableStorage {
         publicInputs[5] = bytes32(_timeStamps.proofExpireTimeStamp);
         publicInputs[6] = bytes32(_timeStamps.historicTimeStamp);
         publicInputs[7] = bytes32(_publicHash);
-        publicInputs[8] = bytes32(_messagesHash); // first_message_hash
 
-        uint256 unshieldingOffset = PUBLIC_INPUTS_HEAD;
+        // a loop of its own: together with the offsets below the stack gets too deep
+        for (uint256 i = 0; i < size; i++) {
+            publicInputs[PUBLIC_INPUTS_HEAD + i] = bytes32(
+                keccak31Byte(_messages[i])
+            );
+        }
+
+        uint256 unshieldingOffset = PUBLIC_INPUTS_HEAD + size;
         uint256 nullifiersOffset = unshieldingOffset + size * 3;
         uint256 recipientsOffset = nullifiersOffset + size;
         for (uint256 i = 0; i < size; i++) {

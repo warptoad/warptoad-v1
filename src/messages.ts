@@ -20,7 +20,6 @@ import {
     bytesToBigInt,
     bytesToString,
     concat,
-    encodeAbiParameters,
     hexToBytes,
     stringToBytes,
     toBytes,
@@ -29,7 +28,7 @@ import {
     type PublicClient,
 } from "viem";
 import { CIRCUIT_COMP_STORAGE_EMPTY, JOIN_SPLIT_SELECTOR } from "./constants.js";
-import { hashPublic, keccak31Byte, type CircuitCompStorage } from "./hashing.js";
+import { keccak31Byte, type CircuitSizeFields } from "./hashing.js";
 import { fakeNote, hashNote } from "./proving.js";
 import type { Note, WarptoadContract } from "./types.js";
 
@@ -77,7 +76,9 @@ const PLAINTEXT_SIZE = noteToJson({
     assetId: MAX_FIELD,
     amount: MAX_FIELD,
     circuitCompSelector: MAX_FIELD,
-    circuitCompStorage: [MAX_FIELD, MAX_FIELD, MAX_FIELD],
+    circuitCompStorage: CIRCUIT_COMP_STORAGE_EMPTY.map(function () {
+        return MAX_FIELD;
+    }),
 }).length;
 
 /** one view key per wallet, from any secret. sha256 mod n has negligible bias since n is within 2^-128 of 2^256 */
@@ -129,22 +130,23 @@ export async function fakeMessage(nonce: bigint): Promise<Hex> {
 }
 
 /**
- * mirror of `Warptoad.hashMessages`: keccak31Byte(abi.encode(messages[0], messages[1])), the circuit's
- * `first_message_hash`. Only the first two slots: that is what a swaptoad maker signs over, the rest of the
- * messages are not bound to the proof by the contract
+ * the circuit's `message_hashes`, one per slot: keccak31Byte(message), the way `Warptoad.formatPublicInputs` hashes
+ * them. They are public inputs, so every message is bound to the proof, and a swaptoad maker signs the hash of the
+ * message each of their new notes is announced in
  */
-export function hashMessages(messages: Hex[]): bigint {
-    return keccak31Byte(encodeAbiParameters([{ type: "bytes" }, { type: "bytes" }], [messages[0], messages[1]]));
+export function hashMessages(messages: Hex[]): CircuitSizeFields {
+    return messages.map(function (message) {
+        return keccak31Byte(message);
+    }) as CircuitSizeFields;
 }
 
 /**
- * the two message related public inputs of a tx. `firstMessageHash` the contract recomputes from the messages,
- * `publicHash` it passes through as given. The sdk sets it to `hashPublic(firstMessageHash, 0)` so the spend
- * signature covers the first two messages, see `hash_public` in circuits/src/hashing.nr
+ * the message related public inputs of a tx. `messageHashes` the contract recomputes from the messages, `publicHash`
+ * it passes through as given. The messages are bound to the proof by their own hashes, so `publicHash` is 0 until a tx
+ * does something else in public that the spend signature has to cover
  */
-export function publicHashOf(messages: Hex[]): { publicHash: bigint; firstMessageHash: bigint } {
-    const firstMessageHash = hashMessages(messages);
-    return { publicHash: hashPublic({ messagesHash: firstMessageHash, otherHash: 0n }), firstMessageHash };
+export function publicHashOf(messages: Hex[]): { publicHash: bigint; messageHashes: CircuitSizeFields } {
+    return { publicHash: 0n, messageHashes: hashMessages(messages) };
 }
 
 /**
@@ -194,7 +196,7 @@ function jsonToNote(json: string): Note {
         ownerHash: BigInt(j.ownerHash),
         sharedNonce: BigInt(j.sharedNonce),
         circuitCompSelector: BigInt(j.circuitCompSelector),
-        circuitCompStorage: j.circuitCompStorage.map(BigInt) as CircuitCompStorage,
+        circuitCompStorage: j.circuitCompStorage.map(BigInt),
         assetId: BigInt(j.assetId),
         amount: BigInt(j.amount),
     };

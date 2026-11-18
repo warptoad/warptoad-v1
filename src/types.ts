@@ -52,6 +52,8 @@ export type CommitmentProofDataInput = {
     first_giga_index: bigint;
     last_giga_index: bigint;
     wrapper_id: bigint;
+    /** `hashOwnerKeys` of the note's owner. Only read when swaptoad spends the note for its owner, 0 otherwise */
+    owner_keys_hash: bigint;
 };
 
 export type CommitmentSpendProofInput = {
@@ -88,8 +90,8 @@ export type PubInputs = {
     roots: PubRootsAndIndexesInput;
     time_stamps: TimeStampsInput;
     public_hash: bigint;
-    /** `Warptoad.hashMessages(messages[0], messages[1])`, see `hashMessages` in messages.ts */
-    first_message_hash: bigint;
+    /** one per message, the contract recomputes them. See `hashMessages` in messages.ts */
+    message_hashes: CircuitSizeFields;
     unshielding_commitments: UnshieldingCommitmentInput[];
     nullifiers: CircuitSizeFields;
     recipient_commitments_hashes: CircuitSizeFields;
@@ -108,7 +110,8 @@ export type PrivInputs = {
     actual_amount_spend_commitments: number;
     owner: OwnerInputs;
     auth: AuthInputs;
-    circuit_comp_selector: bigint;
+    /** which circuit component checks spend slot i: JOIN_SPLIT_SELECTOR or SWAP_TOAD_SELECTOR, fake slots included */
+    spend_selectors: CircuitSizeFields;
 };
 
 /** the two arguments of `main` */

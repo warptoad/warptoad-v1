@@ -23,7 +23,7 @@ export const GIGA_LEAF_DOMAIN =
 export type PubKey = { x: bigint; y: bigint };
 
 /** `[Field; CIRCUIT_COMP_STORAGE_SIZE]` */
-export type CircuitCompStorage = [bigint, bigint, bigint];
+export type CircuitCompStorage = bigint[];
 /** `[Field; CIRCUIT_COMP_AUTH_SIZE]`, see `authSigInputs` in proving.ts to pad a shorter list */
 export type CircuitCompAuthSigInputs = bigint[];
 /** `[Field; CIRCUIT_SIZE]` */
@@ -140,8 +140,8 @@ export function hashSpendSignatureInputs({
 
 /**
  * `hash_public`: Poseidon2([messages_hash, other_hash]), the sdk's convention for the circuit's `public_hash`.
- * The contract passes `publicHash` through to the proof unchecked, only `first_message_hash` is computed onchain,
- * so what goes in here is up to the signer. `messagesHash` is `hashMessages` in messages.ts, `otherHash` is 0 for now
+ * The contract passes `publicHash` through to the proof unchecked, only `message_hashes` are computed onchain,
+ * so what goes in here is up to the signer. Not used yet: the sdk's `publicHash` is 0 for now, see `publicHashOf` in messages.ts
  */
 export function hashPublic({ messagesHash, otherHash }: { messagesHash: bigint; otherHash: bigint }): bigint {
     return poseidon2Hash([messagesHash, otherHash]);
@@ -164,17 +164,24 @@ export function hashAssetId({
     return poseidon2Hash([firstGigaIndex, lastGigaIndex, wrapperId]);
 }
 
-/** `hash_nullifier`: Poseidon2([nullifier_secret, giga_leaf_index, local_leaf_index]) */
+/**
+ * `hash_nullifier`: Poseidon2([nullifier_secret, shared_nonce, giga_leaf_index, local_leaf_index])
+ *
+ * `nullifierSecret` is the owner's for a join_split note. A swaptoad note has one of its own in its storage, see
+ * `SWAPTOAD_STORAGE_OFFSETS` in circuits/src/main.nr, so a fill and the owner's cancel give the same nullifier
+ */
 export function hashNullifier({
     nullifierSecret,
+    sharedNonce,
     gigaLeafIndex,
     localLeafIndex,
 }: {
     nullifierSecret: bigint;
+    sharedNonce: bigint;
     gigaLeafIndex: bigint;
     localLeafIndex: bigint;
 }): bigint {
-    return poseidon2Hash([nullifierSecret, gigaLeafIndex, localLeafIndex]);
+    return poseidon2Hash([nullifierSecret, sharedNonce, gigaLeafIndex, localLeafIndex]);
 }
 
 /**

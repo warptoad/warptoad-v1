@@ -61,8 +61,9 @@ pnpm verify:wrapper:sepolia 0xDDC81Fb1123eE927FFCadAD2367b4aAC75CE6F11
 Run tests on sepolia (`run`, not `test`: the test task can't unlock the keystore)
 ```sh
 pnpm hardhat run test/ClaudeLilMessaging.test.ts --network sepolia   # shield, shielded tx, unshield
-pnpm hardhat run test/ClaudesLilSwapToadFill.test.ts --network sepolia     # alice locks, bob fills, both unshield
-pnpm hardhat run test/ClaudesLilSwapToadCancel.test.ts --network sepolia   # alice locks, cancels, unshields
+pnpm hardhat run test/ClaudesLilSwapToadFill.test.ts --network sepolia     # alice offers, bob fills, both unshield
+pnpm hardhat run test/ClaudesLilSwapToadCancel.test.ts --network sepolia   # alice offers, cancels, unshields
+pnpm hardhat run test/ClaudesLilMessageBinding.test.ts --network sepolia  # a relayer can't swap or drop a message
 ```
 
 ## Circuits

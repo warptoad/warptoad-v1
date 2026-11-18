@@ -15,6 +15,7 @@ import {
     hashPreCommitment,
     type CircuitCompAuthSigInputs,
     type CircuitCompStorage,
+    type CircuitSizeFields,
 } from "./hashing.js";
 import type {
     Asset,
@@ -130,7 +131,7 @@ function selectorOf(n: Note): bigint {
 }
 
 function storageOf(n: Note): CircuitCompStorage {
-    return n.circuitCompStorage ?? ([...CIRCUIT_COMP_STORAGE_EMPTY] as CircuitCompStorage);
+    return n.circuitCompStorage ?? [...CIRCUIT_COMP_STORAGE_EMPTY];
 }
 
 /** what `Warptoad.shield` takes: everything in the leaf except the asset and amount */
@@ -188,7 +189,9 @@ export function sealedRecipientInput(n: SealedNote): CommitmentRecipientDataInpu
 /**
  * a spend slot of the circuit. `asset` is the preimage of `n.assetId`, see assets.ts: the circuit checks it hashes
  * to the note's asset_id and that the leaf's giga index is inside its range. `gigaProof` stays empty for a spend on
- * the note's own chain. Fakes only need a nonce
+ * the note's own chain. `ownerKeysHash` is only for someone else's note that a swaptoad order lets you spend: the
+ * circuit checks the note's owner hash is this hash on this chain. Your own notes are checked against the `owner`
+ * inputs. Fakes only need a nonce
  */
 export function spendInput(
     n: Note,
@@ -196,10 +199,12 @@ export function spendInput(
     localProof: MerkleProofInput,
     localEdgeIndex: bigint,
     gigaProof: MerkleProofInput = emptyProof(),
+    ownerKeysHash: bigint = 0n,
 ): CommitmentSpendProofInput {
     return {
         commitment: {
             owner_hash: n.ownerHash,
+            owner_keys_hash: ownerKeysHash,
             shared_nonce: n.sharedNonce,
             circuit_comp_selector: selectorOf(n),
             circuit_comp_storage: [...storageOf(n)],
@@ -228,15 +233,26 @@ export function fakeSpendInput(nonce: bigint): CommitmentSpendProofInput {
     return spendInput(fakeNote(nonce), FAKE_ASSET, emptyProof(), 0n);
 }
 
-/** pads what a circuit component signs over to CIRCUIT_COMP_AUTH_SIZE, which is what `hash_circuit_component_auth_sig` hashes */
+/**
+ * `spend_selectors` for a tx where join_split checks every spend. Fake slots need a known selector too, join_split
+ * skips them. A swaptoad fill puts SWAP_TOAD_SELECTOR in the slots of the maker's notes instead
+ */
+export function joinSplitSelectors(): CircuitSizeFields {
+    return [JOIN_SPLIT_SELECTOR, JOIN_SPLIT_SELECTOR, JOIN_SPLIT_SELECTOR, JOIN_SPLIT_SELECTOR];
+}
+
+/**
+ * pads what a circuit component signs over to CIRCUIT_COMP_AUTH_SIZE, which is what `hash_circuit_component_auth_sig`
+ * hashes. The first input is the selector of the component the signature is for
+ */
 export function authSigInputs(inputs: bigint[]): CircuitCompAuthSigInputs {
     if (inputs.length > CIRCUIT_COMP_AUTH_SIZE) throw new Error(`${inputs.length} auth inputs, the circuit takes ${CIRCUIT_COMP_AUTH_SIZE}`);
     return [...inputs, ...zeros(CIRCUIT_COMP_AUTH_SIZE - inputs.length)];
 }
 
 /**
- * no auth signature: `pub_key.x == 0` is the sentinel the circuit skips the signature check on. join_split never
- * needs one, and cancelling a swaptoad lock is a join_split spend too
+ * no auth signature: `pub_key.x == 0` is the sentinel the circuit skips the signature check on, and the 0 where the
+ * selector goes keeps every other circuit component asleep. join_split never needs one
  */
 export function noAuth(): AuthInputs {
     return {

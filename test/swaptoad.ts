@@ -8,7 +8,7 @@
  *
  * Runs on hardhat and on a live chain (see README, Deploy). Live: Warptoad and the factory come from
  * ignition/deployments/chain-<id>/, alice and bob are the second and third configured accounts (the deployer tops
- * them up with gas), and nonces and lock secrets are randomised so reruns don't collide
+ * them up with gas), and nonces are randomised so reruns don't collide
  */
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
@@ -21,7 +21,7 @@ import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { parseUnits, type Address, type Hex } from "viem";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { Asset, Note, TimeStampsInput, WarptoadContract, WrapperERC20Contract, WrapperFactoryContract } from "../src/types.js";
-import { JOIN_SPLIT_SELECTOR, SWAP_TOAD_ORDER_SIZE } from "../src/constants.js";
+import { CIRCUIT_COMP_STORAGE_SIZE, SWAP_TOAD_ORDER_SIZE, SWAP_TOAD_SELECTOR } from "../src/constants.js";
 import {
     hashAssetId,
     hashFakeCommitment,
@@ -40,6 +40,7 @@ import {
     fakeNote,
     fakeSpendInput,
     hashNote,
+    joinSplitSelectors,
     merkleProofInput,
     noAuth,
     noUnshield,
@@ -61,10 +62,10 @@ import { deployInfra, deployWarptoad, fundIfLow, wrap, ZERO_ADDRESS, type Wallet
 export const USDC = (amount: string) => parseUnits(amount, 6);
 export const DAI = (amount: string) => parseUnits(amount, 18);
 
-// no encrypted blobs in these tests, but the contract always hashes the first two messages into first_message_hash,
-// and public_hash goes in the spend signature and the maker's order. See ClaudeLilMessaging.test.ts
+// no encrypted blobs in these tests, but the contract always hashes every message into message_hashes, a maker's
+// order names the ones for its new notes, and public_hash goes in the spend signature. See ClaudeLilMessaging.test.ts
 export const NO_MESSAGES: Hex[] = ["0x", "0x", "0x", "0x"];
-export const { publicHash: PUBLIC_HASH, firstMessageHash: FIRST_MESSAGE_HASH } = publicHashOf(NO_MESSAGES);
+export const { publicHash: PUBLIC_HASH, messageHashes: MESSAGE_HASHES } = publicHashOf(NO_MESSAGES);
 const noTarget = { wrapperFactory: ZERO_ADDRESS, wrapperArgs: "0x" as Hex };
 const noUnshieldCommitment = { recipient: 0n, amount: 0n, assetId: 0n };
 /** MockERC20s to reuse on a live chain, anyone can mint them. A missing one gets deployed and its address printed */
@@ -86,7 +87,7 @@ export type Party = {
     ownerHash: bigint;
     wallet: WalletClient;
 };
-/** a maker signs orders with a key of its own, the lock stores its pubkey. A taker never needs one */
+/** a maker signs orders with a key of its own, the swaptoad note it puts up for a trade stores its pubkey. A taker never needs one */
 export type Maker = Party & { orderKey: string; orderPubKey: PubKey };
 
 /** a mock token, its wrapper, and the asset notes of it carry */
@@ -108,7 +109,7 @@ export async function connectSwapToad() {
     const [deployer, aliceWallet = deployer, bobWallet = deployer] = await viem.getWalletClients();
     const chainId = await publicClient.getChainId();
     const live = chainId !== 31337;
-    // fake nullifiers, fake commitments and lock secrets are hashed into leaves and nullifiers, so every live run needs fresh ones
+    // fake nullifiers, fake commitments and per note secrets are hashed into leaves and nullifiers, so every live run needs fresh ones
     const nonceBase = live ? BigInt(Date.now()) << 16n : 0n;
     function nonce(i: number) {
         return nonceBase + BigInt(i);
@@ -173,6 +174,7 @@ export async function connectSwapToad() {
         warptoad,
         factory,
         gigaIndex,
+        party,
         alice,
         bob,
         backend,
@@ -212,26 +214,32 @@ export async function setupToken(
     return { token, wrapper, asset, id: hashAssetId(asset), args: encodeWrapperArgs({ wrapper: wrapper.address, underlying: token.address }) };
 }
 
-/** what goes in a swaptoad lock's circuit_comp_storage: who may sign orders on it, and the secret that nullifies it */
-export function lockStorage(maker: Maker, sharedNullifierSecret: bigint): CircuitCompStorage {
-    return [maker.orderPubKey.x, maker.orderPubKey.y, sharedNullifierSecret];
+/**
+ * the circuit_comp_storage of a swaptoad note, see `SWAPTOAD_STORAGE_OFFSETS` in circuits/src/main.nr: the pubkey its
+ * orders are signed with, until when that key may be used, and the secret the note is nullified with. That secret is
+ * the note's own and not the owner's, so a taker can be given it. The owner can still spend the note with join_split
+ * any time, with the same nullifier, and that is the cancel
+ */
+export function swapToadStorage(maker: Maker, { authExpiry, sharedNullifierSecret }: { authExpiry: bigint; sharedNullifierSecret: bigint }): CircuitCompStorage {
+    return [maker.orderPubKey.x, maker.orderPubKey.y, authExpiry, sharedNullifierSecret, ...zeros(CIRCUIT_COMP_STORAGE_SIZE - 4)];
 }
 
-/** `lockStorage` read back, by a taker who was handed the lock */
-export function lockStorageOf(lock: Note): { orderPubKey: PubKey; sharedNullifierSecret: bigint } {
-    if (lock.circuitCompStorage === undefined) throw new Error("not a swaptoad lock, it has no circuit_comp_storage");
-    const [x, y, sharedNullifierSecret] = lock.circuitCompStorage;
-    return { orderPubKey: { x, y }, sharedNullifierSecret };
+/** `swapToadStorage` read back, by a taker who was handed the note */
+export function swapToadStorageOf(note: Note): { orderPubKey: PubKey; authExpiry: bigint; sharedNullifierSecret: bigint } {
+    if (note.circuitCompStorage === undefined) throw new Error("not a swaptoad note, it has no circuit_comp_storage");
+    const [x, y, authExpiry, sharedNullifierSecret] = note.circuitCompStorage;
+    return { orderPubKey: { x, y }, authExpiry, sharedNullifierSecret };
 }
 
 /**
- * what a maker signs, see `SWAPTOAD_ORDER_OFFSETS` in circuits/src/main.nr: the hashes of the notes they want made, of the locks
- * that pay for them, the message hashes, and when the order expires. Entry i of each list is slot i of the fill, a
- * shorter list is padded with 0, which the circuit reads as "nothing of the maker's in this slot"
+ * what a maker signs, see `SWAPTOAD_ORDER_OFFSETS` in circuits/src/main.nr: the swaptoad selector, the hashes of the
+ * notes they want made, of their notes that pay for them, a message hash per new note, and when the order expires.
+ * Entry i of each list is slot i of the fill, a shorter list is padded with 0, which the circuit reads as "nothing of
+ * the maker's in this slot"
  */
-export function swapToadOrder({ newCommitHashes, lockHashes, messageHashes, expiry }: {
+export function swapToadOrder({ newCommitHashes, spendCommitHashes, messageHashes, expiry }: {
     newCommitHashes: bigint[];
-    lockHashes: bigint[];
+    spendCommitHashes: bigint[];
     messageHashes: bigint[];
     expiry: bigint;
 }): CircuitCompAuthSigInputs {
@@ -239,10 +247,10 @@ export function swapToadOrder({ newCommitHashes, lockHashes, messageHashes, expi
         if (hashes.length > SWAP_TOAD_ORDER_SIZE) throw new Error(`${hashes.length} hashes, an order takes ${SWAP_TOAD_ORDER_SIZE}`);
         return [...hashes, ...zeros(SWAP_TOAD_ORDER_SIZE - hashes.length)];
     }
-    return authSigInputs([...pad(newCommitHashes), ...pad(lockHashes), ...pad(messageHashes), expiry]);
+    return authSigInputs([SWAP_TOAD_SELECTOR, ...pad(newCommitHashes), ...pad(spendCommitHashes), ...pad(messageHashes), expiry]);
 }
 
-/** `Warptoad.shield` from `wallet`'s wrapper balance. shield takes any pre_commitment_hash, so this makes locks too */
+/** `Warptoad.shield` from `wallet`'s wrapper balance. shield takes any pre_commitment_hash */
 export async function shieldNote(w: SwapToadWorld, side: TokenSide, note: Note, wallet: WalletClient) {
     await w.send(w.warptoad.write.shield([w.factory.address, preCommitmentHashOf(note), note.amount, side.args, "0x"], { account: wallet.account }));
 }
@@ -297,7 +305,7 @@ export async function unshieldAndUnwrap(w: SwapToadWorld, side: TokenSide, note:
         hashFakeCommitment({ nonce: w.nonce(n + 3) }),
     ] as CircuitSizeFields;
     const nullifiers = [
-        hashNullifier({ nullifierSecret: owner.nullifierSecret, gigaLeafIndex: w.gigaIndex, localLeafIndex: localProof.index }),
+        hashNullifier({ nullifierSecret: owner.nullifierSecret, sharedNonce: note.sharedNonce, gigaLeafIndex: w.gigaIndex, localLeafIndex: localProof.index }),
         hashFakeNullifier({ nonce: w.nonce(n + 4) }),
         hashFakeNullifier({ nonce: w.nonce(n + 5) }),
         hashFakeNullifier({ nonce: w.nonce(n + 6) }),
@@ -315,7 +323,7 @@ export async function unshieldAndUnwrap(w: SwapToadWorld, side: TokenSide, note:
             roots: pubRoots(localTree.root, edgeIndex, w.gigaIndex),
             time_stamps: ts,
             public_hash: PUBLIC_HASH,
-            first_message_hash: FIRST_MESSAGE_HASH,
+            message_hashes: MESSAGE_HASHES,
             unshielding_commitments: [unshieldInput(recipient, note.assetId, note.amount), noUnshield(), noUnshield(), noUnshield()],
             nullifiers,
             recipient_commitments_hashes: recipientHashes,
@@ -338,7 +346,7 @@ export async function unshieldAndUnwrap(w: SwapToadWorld, side: TokenSide, note:
                 signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
             },
             auth: noAuth(),
-            circuit_comp_selector: JOIN_SPLIT_SELECTOR,
+            spend_selectors: joinSplitSelectors(),
         },
     });
     const tx = privateTx(w, { root: localTree.root, edgeIndex, ts, nullifiers, recipientHashes, proof, unshield: { recipient, note, side } });

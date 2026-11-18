@@ -4,14 +4,16 @@
 import { poseidon2Hash } from "@zkpassport/poseidon2";
 
 export const CIRCUIT_SIZE = 4;
-// a swaptoad order names at most this many of the maker's locks, new notes and message hashes.
+// a swaptoad order names at most this many of the maker's spent notes, new notes and message hashes.
 // the last nullifier is left for the taker's payment
 export const SWAP_TOAD_ORDER_SIZE = CIRCUIT_SIZE - 1;
 // the order's expiry
 export const SWAP_TOAD_MISC_AUTH_INPUTS = 1;
-// what a swaptoad maker signs: new note hashes, lock hashes and message hashes, then the misc inputs
-export const CIRCUIT_COMP_AUTH_SIZE = 3 * SWAP_TOAD_ORDER_SIZE + SWAP_TOAD_MISC_AUTH_INPUTS;
-export const CIRCUIT_COMP_STORAGE_SIZE = 3;
+// the selector of the circuit component the signature is for, always first
+export const NON_CIRCUIT_COMP_AUTH_INPUTS = 1;
+// what a swaptoad maker signs: the selector, then new note hashes, spent note hashes and message hashes, then the misc inputs
+export const CIRCUIT_COMP_AUTH_SIZE = NON_CIRCUIT_COMP_AUTH_INPUTS + 3 * SWAP_TOAD_ORDER_SIZE + SWAP_TOAD_MISC_AUTH_INPUTS;
+export const CIRCUIT_COMP_STORAGE_SIZE = 7;
 export const CIRCUIT_COMP_STORAGE_EMPTY: readonly bigint[] = Object.freeze(
     new Array<bigint>(CIRCUIT_COMP_STORAGE_SIZE).fill(0n),
 );

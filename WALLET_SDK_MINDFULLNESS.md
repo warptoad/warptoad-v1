@@ -76,6 +76,25 @@ which is not in the order. Do not confuse the two secrets.
 A fill asserts `locked_commitment.owner_hash == hash_owner(owner_keys_hash, current_giga_index)`.
 An address-shaped `owner_hash` has no such preimage and can never be filled. Only cancel would work.
 
+### Dont trust incoming shielded txs with shit non JOIN_SPLIT storage slot
+
+Anything in `circuit_comp_storage` can mean additional rules on who may spend the note, and whoever creates a note
+picks its storage. A note under your `owner_hash` with storage you did not choose may still be spendable by its sender.
+
+Example, swaptoad: 
+- **owner pubkey**: can **cancel** a trade (regular join_split)
+- **auth pubkey** (in storage): **authorizes a order** by signing it
+
+That's fine if you **own both keys**. With **owner pubkey** that is true, it's in owner_hash. But **auth pubkey** is in **circuit_component_storage**, a sender can **put anything in there**, like an **auth pubkey only they own**.   
+Now you kinda end up with a 1/2 multisig, **2 authorized** keys: **you** (yay!), **other guy** (no :/).  
+And **other guy** can just authorize a trade where he **sells all ETH** in that commitment you thought was urs **for 0 USDC**.
+
+So just check circuit_component_storage:
+- Anything that has JOIN_SPLIT as it's circuit component storage slot is for sure yours
+- Another storage slot from a different circuit component is wierd and should either be:
+    - investigated if the keys in storage are actually owned by the user
+    - or ignored if the wallet/sdk implementation does not want to deal with the complexity.
+
 ## User might mess this up
 
 ### Reusing `owner_keys_hash`
