@@ -36,7 +36,7 @@ import {
     hashOwner,
     hashOwnerKeys,
     hashPreCommitment,
-    hashSpendSignatureInputs,
+    hashPublic,
     type CircuitSizeFields,
 } from "../src/hashing.js";
 import {
@@ -55,7 +55,7 @@ import {
     unshieldInput,
 } from "../src/proving.js";
 import { assetOf, encodeWrapperArgs, encodeWrapperDeployArgs, resolveAsset } from "../src/assets.js";
-import { decryptNote, deriveViewKey, encryptNote, fakeMessage, getAllNotes, publicHashOf } from "../src/messages.js";
+import { decryptNote, deriveViewKey, encryptNote, fakeMessage, getAllNotes, hashMessages } from "../src/messages.js";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { Barretenberg, UltraHonkBackend } from "@aztec/bb.js";
@@ -233,14 +233,13 @@ describe("ClaudeLilMessaging", async function () {
             await fakeMessage(nonce(2003)),
             await fakeMessage(nonce(2004)),
         ];
-        const { publicHash, messageHashes } = publicHashOf(messages);
+        const messageHashes = hashMessages(messages);
 
-        const sigHash = hashSpendSignatureInputs({
-            publicHash,
-            spendCommitmentHashes: [hashNote(aliceDeposit), 0n, 0n, 0n],
-            recipientCommitmentHashes: recipientHashes,
-        });
-        const sig = signMessage(alice.eddsaKey, sigHash);
+        // what the spender authorizes: every message, unshield, nullifier and new note of this tx. The contract
+        // computes the same hash, see `hashPublic`
+        const unshielding = [noUnshield(), noUnshield(), noUnshield(), noUnshield()];
+        const publicHash = hashPublic({ messageHashes: messageHashes, unshieldingCommitments: unshielding, nullifiers, recipientCommitmentHashes: recipientHashes });
+        const sig = signMessage(alice.eddsaKey, publicHash);
 
         const now = (await publicClient.getBlock()).timestamp;
         const ts = { proof_expire_time_stamp: now + 3600n, historic_time_stamp: now - 3600n };
@@ -250,7 +249,7 @@ describe("ClaudeLilMessaging", async function () {
                 time_stamps: ts,
                 public_hash: publicHash,
                 message_hashes: messageHashes,
-                unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
+                unshielding_commitments: unshielding,
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
@@ -284,7 +283,6 @@ describe("ClaudeLilMessaging", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages,
-            publicHash,
             proof,
         };
         // a relayer swapping bob's message for garbage changes its entry in message_hashes, a public input the proof was
@@ -350,14 +348,13 @@ describe("ClaudeLilMessaging", async function () {
             await fakeMessage(nonce(3002)),
             await fakeMessage(nonce(3003)),
         ];
-        const { publicHash, messageHashes } = publicHashOf(messages);
+        const messageHashes = hashMessages(messages);
 
-        const sigHash = hashSpendSignatureInputs({
-            publicHash,
-            spendCommitmentHashes: [hashNote(bobNote), 0n, 0n, 0n],
-            recipientCommitmentHashes: recipientHashes,
-        });
-        const sig = signMessage(bob.eddsaKey, sigHash);
+        // what the spender authorizes: every message, unshield, nullifier and new note of this tx. The contract
+        // computes the same hash, see `hashPublic`
+        const unshielding = [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()];
+        const publicHash = hashPublic({ messageHashes: messageHashes, unshieldingCommitments: unshielding, nullifiers, recipientCommitmentHashes: recipientHashes });
+        const sig = signMessage(bob.eddsaKey, publicHash);
 
         const now = (await publicClient.getBlock()).timestamp;
         const ts = { proof_expire_time_stamp: now + 3600n, historic_time_stamp: now - 3600n };
@@ -367,7 +364,7 @@ describe("ClaudeLilMessaging", async function () {
                 time_stamps: ts,
                 public_hash: publicHash,
                 message_hashes: messageHashes,
-                unshielding_commitments: [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()],
+                unshielding_commitments: unshielding,
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
@@ -408,7 +405,6 @@ describe("ClaudeLilMessaging", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages,
-            publicHash,
             proof,
         };
 

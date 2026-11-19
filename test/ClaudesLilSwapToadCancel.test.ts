@@ -18,8 +18,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, it } from "node:test";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 import type { Note } from "../src/types.js";
-import { SWAP_TOAD_SELECTOR } from "../src/constants.js";
-import { hashFakeCommitment, hashFakeNullifier, hashNullifier, hashSpendSignatureInputs, type CircuitSizeFields } from "../src/hashing.js";
+import { hashFakeCommitment, hashFakeNullifier, hashNullifier, hashPublic, type CircuitSizeFields } from "../src/hashing.js";
 import {
     fakeNote,
     fakeSpendInput,
@@ -38,13 +37,14 @@ import {
     connectSwapToad,
     MESSAGE_HASHES,
     privateTx,
-    PUBLIC_HASH,
     setupToken,
     shieldNote,
     signMessage,
-    swapToadStorage,
+    swapToadNote,
+    swapToadStorageOf,
     unshieldAndUnwrap,
     USDC,
+    type SwapToadNote,
     type TokenSide,
 } from "./swaptoad.js";
 
@@ -53,12 +53,9 @@ describe("ClaudesLilSwapToadCancel", async function () {
     const { alice, gigaIndex, nonce } = w;
     let usdc: TokenSide;
 
-    // alice owns the offered note with her usual spend key and a nullifier secret used for this one note. A taker
-    // would get to see the owner keys hash, and with a fresh secret in it that hash can't be linked to her other notes
-    const offerOwner = w.party(alice.eddsaKey, nonce(0x0ffe1), alice.wallet);
-    // the note's own nullifier secret, a taker would get it with an order. Nobody gets it here
-    const sharedNullifierSecret = nonce(0x5ec1);
-    let offered: Note;
+    // a swaptoad note with an owner, an order key and a nullifier secret of its own, see `swapToadNote`. A taker would
+    // get to see some of that with an order, nobody does here
+    let offered: SwapToadNote;
     let refund: Note;
 
     before(async () => {
@@ -72,26 +69,19 @@ describe("ClaudesLilSwapToadCancel", async function () {
     it("1. alice shields 400 USDC into a swaptoad note", async () => {
         // her order key works on this note for a day
         const authExpiry = (await w.timeStamps()).proof_expire_time_stamp + 86400n;
-        offered = {
-            ownerHash: offerOwner.ownerHash,
-            sharedNonce: nonce(1001),
-            assetId: usdc.id,
-            amount: USDC("400"),
-            circuitCompSelector: SWAP_TOAD_SELECTOR,
-            circuitCompStorage: swapToadStorage(alice, { authExpiry, sharedNullifierSecret }),
-        };
-        await shieldNote(w, usdc, offered, alice.wallet);
+        offered = swapToadNote(w, alice, { assetId: usdc.id, amount: USDC("400"), authExpiry }, 1000);
+        await shieldNote(w, usdc, offered.note, alice.wallet);
 
         assert.equal(await usdc.wrapper.read.balanceOf([alice.wallet.account.address]), 0n, "all of it is shielded");
-        assert.deepEqual((await w.tree()).leaves.slice(-1), [hashNote(offered)]);
+        assert.deepEqual((await w.tree()).leaves.slice(-1), [hashNote(offered.note)]);
     });
 
     it("2. alice cancels without an order signature, the 400 come back as a plain note", async () => {
         const localTree = await w.tree();
-        const { proof: offeredProof, edgeIndex } = merkleProofInput(localTree, hashNote(offered));
+        const { proof: offeredProof, edgeIndex } = merkleProofInput(localTree, hashNote(offered.note));
 
         // the only real new note: same asset and amount as the offered one, back under alice's main keys
-        refund = { ownerHash: alice.ownerHash, sharedNonce: nonce(2001), assetId: usdc.id, amount: offered.amount };
+        refund = { ownerHash: alice.ownerHash, sharedNonce: nonce(2001), assetId: usdc.id, amount: offered.note.amount };
         const recipients = [refund, fakeNote(nonce(2002)), fakeNote(nonce(2003)), fakeNote(nonce(2004))];
         const recipientHashes = [
             hashNote(refund),
@@ -101,26 +91,25 @@ describe("ClaudesLilSwapToadCancel", async function () {
         ] as CircuitSizeFields;
         // nullified with the note's own secret, not alice's: the same nullifier a fill of this note would have used
         const nullifiers = [
-            hashNullifier({ nullifierSecret: sharedNullifierSecret, sharedNonce: offered.sharedNonce, gigaLeafIndex: gigaIndex, localLeafIndex: offeredProof.index }),
+            hashNullifier({ nullifierSecret: swapToadStorageOf(offered.note).sharedNullifierSecret, sharedNonce: offered.note.sharedNonce, gigaLeafIndex: gigaIndex, localLeafIndex: offeredProof.index }),
             hashFakeNullifier({ nonce: nonce(2005) }),
             hashFakeNullifier({ nonce: nonce(2006) }),
             hashFakeNullifier({ nonce: nonce(2007) }),
         ] as CircuitSizeFields;
-        const sigHash = hashSpendSignatureInputs({
-            publicHash: PUBLIC_HASH,
-            spendCommitmentHashes: [hashNote(offered), 0n, 0n, 0n],
-            recipientCommitmentHashes: recipientHashes,
-        });
-        const sig = signMessage(offerOwner.eddsaKey, sigHash);
+        // what the spender authorizes: every message, unshield, nullifier and new note of this tx. The contract
+        // computes the same hash, see `hashPublic`
+        const unshielding = [noUnshield(), noUnshield(), noUnshield(), noUnshield()];
+        const publicHash = hashPublic({ messageHashes: MESSAGE_HASHES, unshieldingCommitments: unshielding, nullifiers, recipientCommitmentHashes: recipientHashes });
+        const sig = signMessage(offered.owner.eddsaKey, publicHash);
 
         const ts = await w.timeStamps();
         const { proof } = await prove(w.backend, circuit as CompiledCircuit, {
             pub_in: {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
-                public_hash: PUBLIC_HASH,
+                public_hash: publicHash,
                 message_hashes: MESSAGE_HASHES,
-                unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
+                unshielding_commitments: unshielding,
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
@@ -130,7 +119,7 @@ describe("ClaudesLilSwapToadCancel", async function () {
                 }),
                 actual_amount_recipient_commitments: 1,
                 spend_commitments: [
-                    spendInput(offered, usdc.asset, offeredProof, edgeIndex),
+                    spendInput(offered.note, usdc.asset, offeredProof, edgeIndex),
                     fakeSpendInput(nonce(2005)),
                     fakeSpendInput(nonce(2006)),
                     fakeSpendInput(nonce(2007)),
@@ -138,8 +127,8 @@ describe("ClaudesLilSwapToadCancel", async function () {
                 actual_amount_spend_commitments: 1,
                 // a cancel is the owner spending their own note through join_split: the keys the note sits under, no order needed
                 owner: {
-                    pub_key: offerOwner.pubKey,
-                    nullifier_secret: offerOwner.nullifierSecret,
+                    pub_key: offered.owner.pubKey,
+                    nullifier_secret: offered.owner.nullifierSecret,
                     signature: { x: sig.R8[0], y: sig.R8[1], scalar: sig.S },
                 },
                 auth: noAuth(),

@@ -26,7 +26,7 @@ import {
     hashOwner,
     hashOwnerKeys,
     hashPreCommitment,
-    hashSpendSignatureInputs,
+    hashPublic,
     type CircuitSizeFields,
 } from "../src/hashing.js";
 import {
@@ -46,7 +46,7 @@ import {
     unshieldInput,
 } from "../src/proving.js";
 import { assetOf, encodeWrapperArgs } from "../src/assets.js";
-import { publicHashOf } from "../src/messages.js";
+import { hashMessages } from "../src/messages.js";
 import type { derivePublicKey as DerivePublicKey, signMessage as SignMessage } from "@zk-kit/eddsa-poseidon";
 import type { CompiledCircuit } from "@noir-lang/noir_js";
 import { Barretenberg, UltraHonkBackend } from "@aztec/bb.js";
@@ -55,9 +55,9 @@ import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
 import { deployInfra, deployWarptoad, wrap, ZERO_ADDRESS, type Deployment } from "./fixtures.js";
 
 // no encrypted blobs here, but the contract always hashes every message into message_hashes,
-// and public_hash goes in the spend signature. See ClaudeLilMessaging.test.ts
+// and those go into public_hash, which the spender signs. See ClaudeLilMessaging.test.ts
 const NO_MESSAGES: Hex[] = ["0x", "0x", "0x", "0x"];
-const { publicHash: PUBLIC_HASH, messageHashes: MESSAGE_HASHES } = publicHashOf(NO_MESSAGES);
+const MESSAGE_HASHES = hashMessages(NO_MESSAGES);
 const noTarget = { wrapperFactory: ZERO_ADDRESS, wrapperArgs: "0x" as Hex };
 // the esm build of eddsa-poseidon trips over blakejs' cjs exports under node, the cjs build is fine
 const { derivePublicKey, signMessage } = createRequire(import.meta.url)("@zk-kit/eddsa-poseidon") as {
@@ -175,22 +175,20 @@ describe("ClaudesLilHappyPath", async function () {
             hashFakeNullifier({ nonce: 2006n }),
             hashFakeNullifier({ nonce: 2007n }),
         ] as CircuitSizeFields;
-        // fake spend slots hash to 0 inside the circuit
-        const sigHash = hashSpendSignatureInputs({
-            publicHash: PUBLIC_HASH,
-            spendCommitmentHashes: [hashNote(aliceDeposit), 0n, 0n, 0n],
-            recipientCommitmentHashes: recipientHashes,
-        });
-        const sig = signMessage(alice.eddsaKey, sigHash);
+        // what the spender authorizes: every message, unshield, nullifier and new note of this tx. The contract
+        // computes the same hash, see `hashPublic`
+        const unshielding = [noUnshield(), noUnshield(), noUnshield(), noUnshield()];
+        const publicHash = hashPublic({ messageHashes: MESSAGE_HASHES, unshieldingCommitments: unshielding, nullifiers, recipientCommitmentHashes: recipientHashes });
+        const sig = signMessage(alice.eddsaKey, publicHash);
 
         const ts = await timeStamps();
         const { proof, publicInputs } = await prove(backend, circuit as CompiledCircuit, {
             pub_in: {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
-                public_hash: PUBLIC_HASH,
+                public_hash: publicHash,
                 message_hashes: MESSAGE_HASHES,
-                unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
+                unshielding_commitments: unshielding,
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
@@ -226,12 +224,11 @@ describe("ClaudesLilHappyPath", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages: NO_MESSAGES,
-            publicHash: PUBLIC_HASH,
             proof,
         };
-        // the contract lays public inputs out the same way bb did, and hashes every message the same way the sdk does
+        // the contract lays public inputs out the same way bb did, and hashes the messages and public_hash the same way the sdk does
         const formatted = await d.warptoad.read.formatPublicInputs([
-            tx.roots, tx.timeStamps, NO_MESSAGES, PUBLIC_HASH, tx.unshieldingCommitments, tx.nullifiers, tx.recipientCommitmentsHashes, gigaIndex,
+            tx.roots, tx.timeStamps, NO_MESSAGES, tx.unshieldingCommitments, tx.nullifiers, tx.recipientCommitmentsHashes, gigaIndex,
         ]);
         assert.deepEqual(
             formatted.map(function (x) {
@@ -268,21 +265,20 @@ describe("ClaudesLilHappyPath", async function () {
             hashFakeNullifier({ nonce: 3005n }),
             hashFakeNullifier({ nonce: 3006n }),
         ] as CircuitSizeFields;
-        const sigHash = hashSpendSignatureInputs({
-            publicHash: PUBLIC_HASH,
-            spendCommitmentHashes: [hashNote(bobNote), 0n, 0n, 0n],
-            recipientCommitmentHashes: recipientHashes,
-        });
-        const sig = signMessage(bob.eddsaKey, sigHash);
+        // what the spender authorizes: every message, unshield, nullifier and new note of this tx. The contract
+        // computes the same hash, see `hashPublic`
+        const unshielding = [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()];
+        const publicHash = hashPublic({ messageHashes: MESSAGE_HASHES, unshieldingCommitments: unshielding, nullifiers, recipientCommitmentHashes: recipientHashes });
+        const sig = signMessage(bob.eddsaKey, publicHash);
 
         const ts = await timeStamps();
         const { proof } = await prove(backend, circuit as CompiledCircuit, {
             pub_in: {
                 roots: pubRoots(localTree.root, edgeIndex, gigaIndex),
                 time_stamps: ts,
-                public_hash: PUBLIC_HASH,
+                public_hash: publicHash,
                 message_hashes: MESSAGE_HASHES,
-                unshielding_commitments: [unshieldInput(bobAddress, assetId, 300n), noUnshield(), noUnshield(), noUnshield()],
+                unshielding_commitments: unshielding,
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
@@ -322,7 +318,6 @@ describe("ClaudesLilHappyPath", async function () {
             nullifiers: [...nullifiers],
             recipientCommitmentsHashes: [...recipientHashes],
             messages: NO_MESSAGES,
-            publicHash: PUBLIC_HASH,
             proof,
         };
         await d.warptoad.write.transactPrivate([tx]);

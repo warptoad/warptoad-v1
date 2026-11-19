@@ -8,8 +8,9 @@
  * (bn254, t=4). Verified against `Poseidon2::hash` for input sizes 2/3/4/6/9.
  */
 import { poseidon2Hash } from "@zkpassport/poseidon2";
-import { keccak256, type Hex } from "viem";
+import { encodeAbiParameters, keccak256, type Hex } from "viem";
 import { FAKE_COMMITMENT_DOMAIN, FAKE_NULLIFIER_DOMAIN } from "./constants.js";
+import type { UnshieldingCommitmentInput } from "./types.js";
 
 /** mirror of `Warptoad.keccak31Byte`: keccak with the last byte dropped, so it fits in a 254 bit field */
 export function keccak31Byte(data: Hex): bigint {
@@ -118,33 +119,41 @@ export function hashSharedNonceSwaptoad({
 }
 
 /**
- * `hash_spend_signature_inputs`:
- * Poseidon2([...spend_commitment_hashes, ...recipient_commitment_hashes, public_hash])
- * over CIRCUIT_SIZE * 2 + 1 fields.
+ * the circuit's `public_hash`, the way `Warptoad.formatPublicInputs` computes it:
+ * keccak31Byte(abi.encode(message hashes, unshielding commitments, nullifiers, recipient commitment hashes)).
  *
- * The circuit reads `spend_commitments[i].commitment_hash` from `ProvenCommitment`;
- * pass those hashes directly here. Unused slots must be the same fake
- * commitment hashes the circuit uses, not zero.
+ * It is everything public a spender has to authorize, and what the spend signature is made over: the circuit checks
+ * the signature against this one field. The nullifiers stand in for the notes being spent, fake slots included
  */
-export function hashSpendSignatureInputs({
-    publicHash,
-    spendCommitmentHashes,
+export function hashPublic({
+    messageHashes,
+    unshieldingCommitments,
+    nullifiers,
     recipientCommitmentHashes,
 }: {
-    publicHash: bigint;
-    spendCommitmentHashes: CircuitSizeFields;
+    messageHashes: CircuitSizeFields;
+    unshieldingCommitments: UnshieldingCommitmentInput[];
+    nullifiers: CircuitSizeFields;
     recipientCommitmentHashes: CircuitSizeFields;
 }): bigint {
-    return poseidon2Hash([...spendCommitmentHashes, ...recipientCommitmentHashes, publicHash]);
-}
-
-/**
- * `hash_public`: Poseidon2([messages_hash, other_hash]), the sdk's convention for the circuit's `public_hash`.
- * The contract passes `publicHash` through to the proof unchecked, only `message_hashes` are computed onchain,
- * so what goes in here is up to the signer. Not used yet: the sdk's `publicHash` is 0 for now, see `publicHashOf` in messages.ts
- */
-export function hashPublic({ messagesHash, otherHash }: { messagesHash: bigint; otherHash: bigint }): bigint {
-    return poseidon2Hash([messagesHash, otherHash]);
+    return keccak31Byte(
+        encodeAbiParameters(
+            [
+                { type: "uint256[]" },
+                { type: "tuple[]", components: [{ type: "uint256" }, { type: "uint256" }, { type: "uint256" }] },
+                { type: "uint256[]" },
+                { type: "uint256[]" },
+            ],
+            [
+                messageHashes,
+                unshieldingCommitments.map(function (u) {
+                    return [u.recipient, u.amount, u.asset_id] as const;
+                }),
+                nullifiers,
+                recipientCommitmentHashes,
+            ],
+        ),
+    );
 }
 
 /**

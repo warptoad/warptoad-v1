@@ -131,22 +131,13 @@ export async function fakeMessage(nonce: bigint): Promise<Hex> {
 
 /**
  * the circuit's `message_hashes`, one per slot: keccak31Byte(message), the way `Warptoad.formatPublicInputs` hashes
- * them. They are public inputs, so every message is bound to the proof, and a swaptoad maker signs the hash of the
- * message each of their new notes is announced in
+ * them. They are public inputs, so every message is bound to the proof, and they go into `hashPublic`, which the
+ * spender signs. A swaptoad maker signs the hash of the message each of their new notes is announced in
  */
 export function hashMessages(messages: Hex[]): CircuitSizeFields {
     return messages.map(function (message) {
         return keccak31Byte(message);
     }) as CircuitSizeFields;
-}
-
-/**
- * the message related public inputs of a tx. `messageHashes` the contract recomputes from the messages, `publicHash`
- * it passes through as given. The messages are bound to the proof by their own hashes, so `publicHash` is 0 until a tx
- * does something else in public that the spend signature has to cover
- */
-export function publicHashOf(messages: Hex[]): { publicHash: bigint; messageHashes: CircuitSizeFields } {
-    return { publicHash: 0n, messageHashes: hashMessages(messages) };
 }
 
 /**

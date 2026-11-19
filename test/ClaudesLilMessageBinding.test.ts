@@ -19,8 +19,8 @@ import type { CompiledCircuit } from "@noir-lang/noir_js";
 import type { Hex } from "viem";
 import type { Note } from "../src/types.js";
 import { CIRCUIT_SIZE } from "../src/constants.js";
-import { hashFakeCommitment, hashFakeNullifier, hashNullifier, hashSpendSignatureInputs, type CircuitSizeFields } from "../src/hashing.js";
-import { publicHashOf } from "../src/messages.js";
+import { hashFakeCommitment, hashFakeNullifier, hashNullifier, hashPublic, type CircuitSizeFields } from "../src/hashing.js";
+import { hashMessages } from "../src/messages.js";
 import {
     fakeNote,
     fakeSpendInput,
@@ -78,13 +78,12 @@ describe("ClaudesLilMessageBinding", async function () {
         ] as CircuitSizeFields;
         // any bytes work, the contract only hashes them
         const messages: Hex[] = ["0x01", "0x02", "0x03", "0x04"];
-        const { publicHash, messageHashes } = publicHashOf(messages);
-        const sigHash = hashSpendSignatureInputs({
-            publicHash,
-            spendCommitmentHashes: [hashNote(deposit), 0n, 0n, 0n],
-            recipientCommitmentHashes: recipientHashes,
-        });
-        const sig = signMessage(alice.eddsaKey, sigHash);
+        const messageHashes = hashMessages(messages);
+        // what the spender authorizes: every message, unshield, nullifier and new note of this tx. The contract
+        // computes the same hash, see `hashPublic`
+        const unshielding = [noUnshield(), noUnshield(), noUnshield(), noUnshield()];
+        const publicHash = hashPublic({ messageHashes: messageHashes, unshieldingCommitments: unshielding, nullifiers, recipientCommitmentHashes: recipientHashes });
+        const sig = signMessage(alice.eddsaKey, publicHash);
 
         const ts = await w.timeStamps();
         const { proof } = await prove(w.backend, circuit as CompiledCircuit, {
@@ -93,7 +92,7 @@ describe("ClaudesLilMessageBinding", async function () {
                 time_stamps: ts,
                 public_hash: publicHash,
                 message_hashes: messageHashes,
-                unshielding_commitments: [noUnshield(), noUnshield(), noUnshield(), noUnshield()],
+                unshielding_commitments: unshielding,
                 nullifiers,
                 recipient_commitments_hashes: recipientHashes,
             },
@@ -118,7 +117,7 @@ describe("ClaudesLilMessageBinding", async function () {
                 spend_selectors: joinSplitSelectors(),
             },
         });
-        const tx = { ...privateTx(w, { root: localTree.root, edgeIndex, ts, nullifiers, recipientHashes, proof }), messages, publicHash };
+        const tx = { ...privateTx(w, { root: localTree.root, edgeIndex, ts, nullifiers, recipientHashes, proof }), messages };
 
         // swapping a message changes its entry in message_hashes, a public input the proof was made for. The generated
         // verifier reverts with its own errors instead of returning false, so no VerificationFailed to match on

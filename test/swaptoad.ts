@@ -29,7 +29,7 @@ import {
     hashNullifier,
     hashOwner,
     hashOwnerKeys,
-    hashSpendSignatureInputs,
+    hashPublic,
     type CircuitCompAuthSigInputs,
     type CircuitCompStorage,
     type CircuitSizeFields,
@@ -54,7 +54,7 @@ import {
     zeros,
 } from "../src/proving.js";
 import { assetOf, encodeWrapperArgs } from "../src/assets.js";
-import { publicHashOf } from "../src/messages.js";
+import { hashMessages } from "../src/messages.js";
 import circuit from "../circuits/target/warptoad_v1.json" with { type: "json" };
 import { deployInfra, deployWarptoad, fundIfLow, wrap, ZERO_ADDRESS, type WalletClient } from "./fixtures.js";
 
@@ -62,10 +62,11 @@ import { deployInfra, deployWarptoad, fundIfLow, wrap, ZERO_ADDRESS, type Wallet
 export const USDC = (amount: string) => parseUnits(amount, 6);
 export const DAI = (amount: string) => parseUnits(amount, 18);
 
-// no encrypted blobs in these tests, but the contract always hashes every message into message_hashes, a maker's
-// order names the ones for its new notes, and public_hash goes in the spend signature. See ClaudeLilMessaging.test.ts
+// no encrypted blobs in these tests, but the contract always hashes every message into message_hashes. A maker's
+// order names the ones for its new notes, and all of them go into public_hash, which the spender signs.
+// See ClaudeLilMessaging.test.ts
 export const NO_MESSAGES: Hex[] = ["0x", "0x", "0x", "0x"];
-export const { publicHash: PUBLIC_HASH, messageHashes: MESSAGE_HASHES } = publicHashOf(NO_MESSAGES);
+export const MESSAGE_HASHES = hashMessages(NO_MESSAGES);
 const noTarget = { wrapperFactory: ZERO_ADDRESS, wrapperArgs: "0x" as Hex };
 const noUnshieldCommitment = { recipient: 0n, amount: 0n, assetId: 0n };
 /** MockERC20s to reuse on a live chain, anyone can mint them. A missing one gets deployed and its address printed */
@@ -87,8 +88,8 @@ export type Party = {
     ownerHash: bigint;
     wallet: WalletClient;
 };
-/** a maker signs orders with a key of its own, the swaptoad note it puts up for a trade stores its pubkey. A taker never needs one */
-export type Maker = Party & { orderKey: string; orderPubKey: PubKey };
+/** a swaptoad note, the keys it sits under and the eddsa key that signs orders on it, see `swapToadNote` */
+export type SwapToadNote = { note: Note; owner: Party; orderKey: string };
 
 /** a mock token, its wrapper, and the asset notes of it carry */
 export type TokenSide = {
@@ -142,12 +143,7 @@ export async function connectSwapToad() {
         const ownerKeysHash = hashOwnerKeys({ spendPubKey: pubKey, nullifierSecret });
         return { eddsaKey, nullifierSecret, pubKey, ownerKeysHash, ownerHash: hashOwner({ ownerKeysHash, gigaIndex }), wallet };
     }
-    const [orderX, orderY] = derivePublicKey("alice's swaptoad order key");
-    const alice: Maker = {
-        ...party("alice's eddsa key, any bytes work", 0xa11cen, aliceWallet),
-        orderKey: "alice's swaptoad order key",
-        orderPubKey: { x: orderX, y: orderY },
-    };
+    const alice = party("alice's eddsa key, any bytes work", 0xa11cen, aliceWallet);
     const bob = party("bob's eddsa key", 0xb0bn, bobWallet);
 
     const bb = await Barretenberg.new({ threads: cpus().length });
@@ -220,8 +216,45 @@ export async function setupToken(
  * the note's own and not the owner's, so a taker can be given it. The owner can still spend the note with join_split
  * any time, with the same nullifier, and that is the cancel
  */
-export function swapToadStorage(maker: Maker, { authExpiry, sharedNullifierSecret }: { authExpiry: bigint; sharedNullifierSecret: bigint }): CircuitCompStorage {
-    return [maker.orderPubKey.x, maker.orderPubKey.y, authExpiry, sharedNullifierSecret, ...zeros(CIRCUIT_COMP_STORAGE_SIZE - 4)];
+export function swapToadStorage(orderPubKey: PubKey, { authExpiry, sharedNullifierSecret }: { authExpiry: bigint; sharedNullifierSecret: bigint }): CircuitCompStorage {
+    return [orderPubKey.x, orderPubKey.y, authExpiry, sharedNullifierSecret, ...zeros(CIRCUIT_COMP_STORAGE_SIZE - 4)];
+}
+
+/**
+ * a swaptoad note of `holder`'s, ready to sign orders on, with the keys it sits under. Shielding or receiving funds
+ * straight into one saves the tx that turns a join_split note into a swaptoad note, and its owner still spends it
+ * with a plain join_split whenever they want.
+ *
+ * A taker filling an order on the note gets to see three things of the holder's: the owner keys hash, the pubkey
+ * orders are signed with and the note's nullifier secret. So none of them is used twice, or two takers could tell
+ * their notes came from the same person: every note gets an owner of its own (the holder's spend key with a fresh
+ * nullifier secret, which makes the owner keys hash a new one), an order key of its own and its own nullifier secret.
+ * `n` is the nonce base, it uses `n` to `n + 3`
+ */
+export function swapToadNote(
+    w: SwapToadWorld,
+    holder: Party,
+    { assetId, amount, authExpiry }: { assetId: bigint; amount: bigint; authExpiry: bigint },
+    n: number,
+): SwapToadNote {
+    const owner = w.party(holder.eddsaKey, w.nonce(n + 1), holder.wallet);
+    // any bytes work as an eddsa key, a wallet would derive these from a root secret
+    const orderKey = `${holder.eddsaKey}, order key ${w.nonce(n + 3)}`;
+    const [x, y] = derivePublicKey(orderKey);
+    const note: Note = {
+        ownerHash: owner.ownerHash,
+        sharedNonce: w.nonce(n),
+        assetId,
+        amount,
+        circuitCompSelector: SWAP_TOAD_SELECTOR,
+        circuitCompStorage: swapToadStorage({ x, y }, { authExpiry, sharedNullifierSecret: w.nonce(n + 2) }),
+    };
+    return { note, owner, orderKey };
+}
+
+/** the secret `note` is nullified with: its own for a swaptoad note, whoever spends it, and the owner's otherwise */
+export function nullifierSecretOf(note: Note, owner: Party): bigint {
+    return note.circuitCompSelector === SWAP_TOAD_SELECTOR ? swapToadStorageOf(note).sharedNullifierSecret : owner.nullifierSecret;
 }
 
 /** `swapToadStorage` read back, by a taker who was handed the note */
@@ -281,14 +314,14 @@ export function privateTx(
         nullifiers: [...nullifiers],
         recipientCommitmentsHashes: [...recipientHashes],
         messages: NO_MESSAGES,
-        publicHash: PUBLIC_HASH,
         proof,
     };
 }
 
 /**
  * a plain join_split unshield of `note` to `owner`'s address, relayed by the deployer, then `owner` unwraps it on
- * the factory. Same shape as step 3 of ClaudesLilHappyPath. `n` is the nonce base for this tx's fakes
+ * the factory. Same shape as step 3 of ClaudesLilHappyPath, and it works on a swaptoad note just the same.
+ * `n` is the nonce base for this tx's fakes
  */
 export async function unshieldAndUnwrap(w: SwapToadWorld, side: TokenSide, note: Note, owner: Party, n: number) {
     const localTree = await w.tree();
@@ -305,26 +338,25 @@ export async function unshieldAndUnwrap(w: SwapToadWorld, side: TokenSide, note:
         hashFakeCommitment({ nonce: w.nonce(n + 3) }),
     ] as CircuitSizeFields;
     const nullifiers = [
-        hashNullifier({ nullifierSecret: owner.nullifierSecret, sharedNonce: note.sharedNonce, gigaLeafIndex: w.gigaIndex, localLeafIndex: localProof.index }),
+        hashNullifier({ nullifierSecret: nullifierSecretOf(note, owner), sharedNonce: note.sharedNonce, gigaLeafIndex: w.gigaIndex, localLeafIndex: localProof.index }),
         hashFakeNullifier({ nonce: w.nonce(n + 4) }),
         hashFakeNullifier({ nonce: w.nonce(n + 5) }),
         hashFakeNullifier({ nonce: w.nonce(n + 6) }),
     ] as CircuitSizeFields;
-    const sigHash = hashSpendSignatureInputs({
-        publicHash: PUBLIC_HASH,
-        spendCommitmentHashes: [hashNote(note), 0n, 0n, 0n],
-        recipientCommitmentHashes: recipientHashes,
-    });
-    const sig = signMessage(owner.eddsaKey, sigHash);
+    // what the spender authorizes: every message, unshield, nullifier and new note of this tx. The contract
+    // computes the same hash, see `hashPublic`
+    const unshielding = [unshieldInput(recipient, note.assetId, note.amount), noUnshield(), noUnshield(), noUnshield()];
+    const publicHash = hashPublic({ messageHashes: MESSAGE_HASHES, unshieldingCommitments: unshielding, nullifiers, recipientCommitmentHashes: recipientHashes });
+    const sig = signMessage(owner.eddsaKey, publicHash);
 
     const ts = await w.timeStamps();
     const { proof } = await prove(w.backend, circuit as CompiledCircuit, {
         pub_in: {
             roots: pubRoots(localTree.root, edgeIndex, w.gigaIndex),
             time_stamps: ts,
-            public_hash: PUBLIC_HASH,
+            public_hash: publicHash,
             message_hashes: MESSAGE_HASHES,
-            unshielding_commitments: [unshieldInput(recipient, note.assetId, note.amount), noUnshield(), noUnshield(), noUnshield()],
+            unshielding_commitments: unshielding,
             nullifiers,
             recipient_commitments_hashes: recipientHashes,
         },

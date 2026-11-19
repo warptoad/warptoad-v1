@@ -64,6 +64,7 @@ pnpm hardhat run test/ClaudeLilMessaging.test.ts --network sepolia   # shield, s
 pnpm hardhat run test/ClaudesLilSwapToadFill.test.ts --network sepolia     # alice offers, bob fills, both unshield
 pnpm hardhat run test/ClaudesLilSwapToadCancel.test.ts --network sepolia   # alice offers, cancels, unshields
 pnpm hardhat run test/ClaudesLilMessageBinding.test.ts --network sepolia  # a relayer can't swap or drop a message
+pnpm hardhat run test/ClaudesLilDelegatedProver.test.ts --network sepolia # a prover with your signature can't change the tx
 ```
 
 ## Circuits

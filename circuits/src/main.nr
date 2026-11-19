@@ -239,7 +239,7 @@ pub struct PubInputs<let SIZE: u32> {
     roots: PubRootsAndIndexes,
     time_stamps: TimeStamps,
     public_hash: Field,
-    message_hashes:[Field;SIZE] ,
+    message_hashes: [Field; SIZE],
     unshielding_commitments: [UnshieldingCommitment; SIZE],
     nullifiers: [Field; SIZE], // to make `spend_commitments` un spendable
     recipient_commitments_hashes: [Field; SIZE],
@@ -546,26 +546,14 @@ fn swaptoad<let SIZE: u32>(
             let maker_spend_commit: Field =
                 inputs.auth_sig_inputs[SWAPTOAD_ORDER_OFFSETS.maker_spend_commit + i];
             if (spend_selectors[i] == SWAP_TOAD_SELECTOR) {
-                assert(
-                    (inputs.actual_amount_spend_commitments > i),
-                    "maker needs to nullify more spend commitments then actual_amount_spend_commitments allows",
-                );
                 let in_maker_spend_commit: ProvenCommitment = inputs.spend_commitments_and_roots[i];
-                assert(
-                    in_maker_spend_commit.giga_leaf_index == inputs.current_giga_index,
-                    "wrong chain, cannot fill this trade here",
-                );
-                //
-                assert(
-                    in_maker_spend_commit.circuit_comp_selector == SWAP_TOAD_SELECTOR,
-                    "only commitments with JOIN_SPLIT_SELECTOR can be used to fill a trade",
-                );
-                check_root(
-                    in_maker_spend_commit,
-                    inputs.local_root,
-                    inputs.giga_root,
-                    "[TOADSWAP] in_maker_spend_commit",
-                );
+                // both spend and auth key usually are at the same security level. Like inside a hardware wallet
+                // but offchain order ux is simply more prone to user error, so giving wallet and users to tools
+                // to mitigate this issue by simply expiring the ability to sign offchain orders is added here.
+                // so bored apes users can somewhat more securely use swaptoad :D
+                let commit_auth_expiry: Field = in_maker_spend_commit.circuit_comp_storage[
+                    SWAPTOAD_STORAGE_OFFSETS
+                        .auth_expiry];
                 let nullifier: Field = hash_nullifier(
                     in_maker_spend_commit.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS
                         .shared_nullifier_secret],
@@ -577,6 +565,35 @@ fn swaptoad<let SIZE: u32>(
                     in_maker_spend_commit.unproven_owner_keys_hash,
                     in_maker_spend_commit.giga_leaf_index,
                 );
+                let pub_key_storage: PubKey = PubKey {
+                    x: in_maker_spend_commit.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS.pub_key.x
+                        ],
+                    y: in_maker_spend_commit.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS.pub_key.y
+                        ],
+                };
+                assert(inputs.auth_sig_pubkey == pub_key_storage, "invalid auth pubkey");
+                assert(
+                    lower_or_equal(inputs.proof_expire_time_stamp, commit_auth_expiry),
+                    "`proof_expire_time_stamp` needs to be before the maker orders spend commitments auth expiry inside the circuit component storage",
+                );
+                check_root(
+                    in_maker_spend_commit,
+                    inputs.local_root,
+                    inputs.giga_root,
+                    "[TOADSWAP] in_maker_spend_commit",
+                );
+                assert(
+                    (inputs.actual_amount_spend_commitments > i),
+                    "maker needs to nullify more spend commitments then actual_amount_spend_commitments allows",
+                );
+                assert(
+                    in_maker_spend_commit.giga_leaf_index == inputs.current_giga_index,
+                    "wrong chain, cannot fill this trade here",
+                );
+                assert(
+                    in_maker_spend_commit.circuit_comp_selector == SWAP_TOAD_SELECTOR,
+                    "only commitments with JOIN_SPLIT_SELECTOR can be used to fill a trade",
+                );
                 assert(
                     in_maker_spend_commit.owner_hash == owner_hash,
                     "owner hash mismatch on swaptoad maker commitment",
@@ -586,24 +603,6 @@ fn swaptoad<let SIZE: u32>(
                     (maker_spend_commit == in_maker_spend_commit.commitment_hash),
                     "expected maker_spend_commit hash does not line up with in_spend_commit_hash in private inputs",
                 );
-                let pub_key_storage: PubKey = PubKey {
-                    x: in_maker_spend_commit.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS.pub_key.x
-                        ],
-                    y: in_maker_spend_commit.circuit_comp_storage[SWAPTOAD_STORAGE_OFFSETS.pub_key.y
-                        ],
-                };
-                // both spend and auth key usually are at the same security level. Like inside a hardware wallet
-                // but offchain order ux is simply more prone to user error, so giving wallet and users to tools
-                // to mitigate this issue by simply expiring the ability to sign offchain orders is added here.
-                // so bored apes users can somewhat more securely use swaptoad :D
-                let commit_auth_expiry: Field = in_maker_spend_commit.circuit_comp_storage[
-                    SWAPTOAD_STORAGE_OFFSETS
-                        .auth_expiry];
-                assert(
-                    lower_or_equal(inputs.proof_expire_time_stamp, commit_auth_expiry),
-                    "`proof_expire_time_stamp` needs to be before the maker orders spend commitments auth expiry inside the circuit component storage",
-                );
-                assert(inputs.auth_sig_pubkey == pub_key_storage, "invalid auth pubkey");
             } else {
                 assert(
                     maker_spend_commit == 0x00,

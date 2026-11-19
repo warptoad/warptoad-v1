@@ -10,7 +10,7 @@ import type { ContractReturnType } from "@nomicfoundation/hardhat-viem/types";
 import { getAddress, parseEventLogs, type Address, type Hex } from "viem";
 import { chainName, chainConfigArgs, NAME_PREFIX, SYMBOL_PREFIX } from "../src/config.js";
 import { CIRCUIT_SIZE } from "../src/constants.js";
-import { hashAssetId, hashCommitment, keccak31Byte } from "../src/hashing.js";
+import { hashAssetId, hashCommitment, hashPublic, keccak31Byte, type CircuitSizeFields } from "../src/hashing.js";
 import {
     assetOf,
     computeWrapperAddress,
@@ -441,7 +441,6 @@ describe("Warptoad contracts", async function () {
             nullifiers: [1n, 2n, 3n, 4n],
             recipientCommitmentsHashes: zeros(),
             messages: new Array<Hex>(CIRCUIT_SIZE).fill("0x"),
-            publicHash: 0n,
             proof: "0x" as Hex,
         });
 
@@ -466,7 +465,6 @@ describe("Warptoad contracts", async function () {
                 { localRoot: 1n, localEdgeIndex: 2n, gigaRoot: 3n, gigaEdgeIndex: 4n },
                 { proofExpireTimeStamp: 7n, historicTimeStamp: 8n },
                 messages,
-                10n,
                 unshielding,
                 nullifiers,
                 recipients,
@@ -476,12 +474,19 @@ describe("Warptoad contracts", async function () {
 
             // 8 head fields, then one hash per message, 3 fields per unshielding slot, nullifiers, recipient commitments.
             // the giga index range moved into the assetId, only current_giga_index is left and the contract fills it in.
-            // `PubInputs` in circuits/src/main.nr puts public_hash (passed through) before message_hashes (the
-            // contract hashes each message), so the proof only verifies with them in that order
+            // public_hash is the last head field and the contract computes it too: a hash over everything after it,
+            // which is what the spender signs
             const head = 8;
+            const messageHashes = messages.map((m) => keccak31Byte(m)) as CircuitSizeFields;
+            const publicHash = hashPublic({
+                messageHashes,
+                unshieldingCommitments: unshielding.map((u) => ({ recipient: u.recipient, amount: u.amount, asset_id: u.assetId })),
+                nullifiers: nullifiers as CircuitSizeFields,
+                recipientCommitmentHashes: recipients as CircuitSizeFields,
+            });
             assert.equal(asBigInt.length, head + CIRCUIT_SIZE * 6);
-            assert.deepEqual(asBigInt.slice(0, head), [1n, 2n, 3n, 4n, d.gigaIndex, 7n, 8n, 10n]);
-            assert.deepEqual(asBigInt.slice(head, head + CIRCUIT_SIZE), messages.map((m) => keccak31Byte(m)));
+            assert.deepEqual(asBigInt.slice(0, head), [1n, 2n, 3n, 4n, d.gigaIndex, 7n, 8n, publicHash]);
+            assert.deepEqual(asBigInt.slice(head, head + CIRCUIT_SIZE), messageHashes);
             const unshieldingOffset = head + CIRCUIT_SIZE;
             assert.deepEqual(asBigInt.slice(unshieldingOffset + 3, unshieldingOffset + 6), [0x11n, 0x12n, 0x13n]);
             assert.equal(asBigInt[unshieldingOffset + CIRCUIT_SIZE * 3 + 2], 0x22n);
