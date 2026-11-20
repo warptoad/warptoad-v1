@@ -20,6 +20,7 @@ pnpm install
 pnpm compile   # hardhat compile
 pnpm test      # hardhat test
 pnpm size      # contract size report
+pnpm bench     # pnpm noir, then proof time, memory, gas and sizes into BENCHMARKS.md, one section per machine
 ```
 
 ### Deploy + verify on Sepolia

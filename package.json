@@ -6,6 +6,7 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "size": "hardhat compile && node scripts/size.ts",
+    "bench": "pnpm noir && hardhat run scripts/bench.ts",
     "deploy:sepolia": "hardhat ignition deploy ignition/modules/Warptoad.ts --network sepolia --parameters ignition/parameters/sepolia.json --reset --verify",
     "deploy:sepolia:resume": "hardhat ignition deploy ignition/modules/Warptoad.ts --network sepolia --parameters ignition/parameters/sepolia.json --verify",
     "verify:wrapper:sepolia": "hardhat verify-wrapper --network sepolia",

@@ -7,26 +7,15 @@
  * Measures `deployedBytecode`, not `bytecode` — the latter is initcode, which
  * includes the constructor and is governed by EIP-3860's separate 49152 limit.
  */
-import { globSync, readFileSync } from "node:fs"
+import { contractSizes, EIP_170_LIMIT } from "./contractSizes.ts"
 
-const EIP_170_LIMIT = 24576
 const WARN_RATIO = 0.9
-
-interface Artifact {
-  contractName: string
-  deployedBytecode: string
-}
 
 const color = process.stdout.isTTY
   ? (code: number, s: string) => `\x1b[${code}m${s}\x1b[0m`
   : (_code: number, s: string) => s
 
-const sizes = globSync("artifacts/contracts/**/*.json")
-  .filter((f) => !f.endsWith(".dbg.json"))
-  .map((f) => JSON.parse(readFileSync(f, "utf8")) as Artifact)
-  .filter((a) => a.contractName && a.deployedBytecode?.length > 2)
-  .map((a) => ({ name: a.contractName, bytes: (a.deployedBytecode.length - 2) / 2 }))
-  .sort((a, b) => b.bytes - a.bytes)
+const sizes = contractSizes()
 
 if (sizes.length === 0) {
   console.error("No artifacts found — run `pnpm compile` first.")
